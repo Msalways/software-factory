@@ -74,7 +74,30 @@ git pull
 npm test
 node tools/build-hattera-package.cjs --souls
 ```
-Then re-apply `dist/souls/*` to the existing bots, as in step 3. The package release number is in `hattera/package.json`. Bump it whenever bot instructions or skills change.
+Then re-apply `dist/souls/*` to the factory's own bots, as in step 3. The release number is in `hattera/package.json`, and `CHANGELOG.md` lists what changed in each release. Bump the release whenever bot instructions or skills change.
+
+## Keep project teams up to date (factory sync)
+For each project, Atlas creates a project team: a Lead, a Builder and a Verifier, with their own rooms. These bots also need factory updates. Sync gives them updates without touching anything the project has built up.
+
+| Factory-owned (replaced on update) | Project-owned (never changed) |
+|---|---|
+| The block between `<!-- factory:begin -->` and `<!-- factory:end -->` in each project bot's instructions and room bulletin | All other text in those instructions and bulletins (the project notes) |
+| Skills whose folder is in `shared/skills` (`factory-*`) | All other skills, bot MEMORY.md and conversations |
+| The `application/factory` record in factory memory | All other memory records, DESIGN.md, ledgers, evidence, branches and worktrees |
+
+```sh
+node tools/factory-sync.cjs status                 # which version each project last synced; "legacy" = never
+node tools/factory-sync.cjs plan <project>         # read-only; writes state/sync/<project>/<version>/
+node tools/factory-sync.cjs record <project> state/sync/<project>/<version>/plan.json
+node tools/factory-sync.cjs render lead --project <id> --path <dir>   # instructions for a new project bot
+```
+1. `plan` reads Hattera's data (bots, rooms, skills) and the project's memory. It writes nothing to Hattera. For each bot it renders the new instructions (`<role>.SOUL.md`) and the room bulletins, and lists the skills to install or update. It finds the bots from the `application/factory` record, then from `application/native-setup`, then by name in the project's section.
+2. Apply the plan through Hattera's native setup (approval card), via the project section's Chief or Atlas. Never edit Hattera's files by hand.
+3. `record` checks that the live bots, rooms and skills now match the plan. It then backs up factory memory and writes `application/factory` (version, hashes, bot IDs). This is the only memory record it changes.
+
+**Projects set up before sync** have no markers and no `application/factory` record, so `status` shows them as `legacy`. `plan` adopts them: the new factory block goes first, and the bot's whole old text is kept word for word below it as project notes. After the first sync, only the block changes.
+
+**Hand edits inside the block** are a conflict. `plan` exits with code 4 and puts the edited block in `plan.json`. Move project-specific rules below the block, then re-run, or run with `--accept-edits` to overwrite them. A bot that would go over Hattera's 24,000-byte limit is also a conflict.
 
 ## What lives where
 | Path | What |

@@ -19,7 +19,7 @@ Roles carry no fixed model. Each slice is routed from live supply (see dynamic-e
 - shared/standards/: reusable engineering and quality standards.
 - shared/templates/: feature briefs, slice specs, DESIGN.md, evidence.json and handoffs.
 
-**Tools** (Node 22.6+, no dependencies, no model calls): `tools/factory-route.cjs` (supply, routing, limits, outcomes), `tools/factory-gates.cjs` (verify gate), `tools/factory-worktrees.cjs` (worktree janitor), `tools/factory-memory.cjs` (project memory) and `tools/build-hattera-package.cjs` (Hattera package). Tests: `npm test`. See dynamic-execution.md §3a and gates-and-handoffs.md (Cleanup).
+**Tools** (Node 22.6+, no dependencies, no model calls): `tools/factory-route.cjs` (supply, routing, limits, outcomes), `tools/factory-gates.cjs` (verify gate), `tools/factory-worktrees.cjs` (worktree janitor), `tools/factory-sync.cjs` (project team updates, see INTEGRATE.md), `tools/factory-memory.cjs` (project memory) and `tools/build-hattera-package.cjs` (Hattera package). Tests: `npm test`. See dynamic-execution.md §3a and gates-and-handoffs.md (Cleanup).
 
 **Start here (2026-11-10):** [pipeline and gates](shared/standards/gates-and-handoffs.md) — Intake → Understand → R&D → Design → Slice → Route → Execute → Verify → Integrate → Release → Learn, each gate default-fail. Rationale: [factory steps](docs/factory-steps-2026-11-10.md), [trial review](docs/factory-review-2026-11-10.md), [public-repo R&D](research/software-factory-rd-2026-11-10.md).
 - research/: source links and research findings.

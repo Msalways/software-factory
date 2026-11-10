@@ -4,7 +4,7 @@
   "description": "Gated multi-bot software delivery for Hattera: standards, templates, skills and Node tools.",
   "engines": {"node": ">=22.6"},
   "scripts": {
-    "test": "node --test tools/factory-gates.test.cjs tools/factory-route.test.cjs tools/factory-memory.test.cjs tools/factory-worktrees.test.cjs",
+    "test": "node --test tools/factory-gates.test.cjs tools/factory-route.test.cjs tools/factory-memory.test.cjs tools/factory-worktrees.test.cjs tools/factory-sync.test.cjs",
     "package": "node tools/build-hattera-package.cjs",
     "worktrees": "node tools/factory-worktrees.cjs list"
   }
