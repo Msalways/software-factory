@@ -36,6 +36,10 @@ Run `node tools/factory-gates.cjs check <worktree> <evidence.json> --run` (add `
 Any code change after verification invalidates the affected results.
 
 ## Handoffs (envelope only)
+Before the first dispatch in a room, and after a phase or authorization change, check that the receiving bot and room bulletin permit the current work. Resolve stale scope through the native authority before sending a worker run. A kickoff message does not override a narrower standing scope.
+
+The worker that runs an external provider owns its launch, session, process observation and checkpoint in its own thread/worktree. Do not launch a process in the Lead's thread and hand its process handle to a worker: handles may be thread-local. Hand off durable session IDs, file paths, logs and verified status instead. Use a supported engine command before building a custom launcher; obtain required permissions through the normal controls.
+
 Between steps and sessions, pass an envelope rather than the whole conversation history: slice spec pointer and version, baseline revision, allowed scope, done-contract, relevant source pointers, prior attempt summary, and continuation packet if one exists. The receiver works from the envelope plus the repository.
 
 ## Failure classification
