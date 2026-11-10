@@ -1,0 +1,8 @@
+{
+  "_about": "Editable routing policy (data, not code). Values here must come from what engines report or from the user; never guess. Capability is learned from 'factory-route outcome' records; use models.<engine/model>.maxComplexity only to override. costClass: free|subscription|metered (unset = unknown).",
+  "engines": {
+    "claude": { "effortLevels": ["low", "medium", "high", "xhigh", "max"], "_source": "Hattera team-setup catalog, observed 2026-11-10" },
+    "codex":  { "effortLevels": ["low", "medium", "high", "xhigh", "max"], "_source": "Hattera team-setup catalog, observed 2026-11-10" }
+  },
+  "models": {}
+}

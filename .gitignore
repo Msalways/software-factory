@@ -1,0 +1,8 @@
+# Runtime and personal data: stays on this machine
+state/
+backups/
+artifacts/
+dist/
+node_modules/
+*.sqlite3
+*.log

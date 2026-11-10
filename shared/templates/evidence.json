@@ -1,0 +1,30 @@
+{
+  "schema": "factory-evidence/1",
+  "project": "<project-id>",
+  "feature": "<feature-id>",
+  "slice": "<slice-id>",
+  "specVersion": "<spec version>",
+  "branch": "<slice branch>",
+  "baseline": "<base revision the slice started from>",
+  "revision": "<commit sha>",
+  "treeClean": true,
+  "route": {
+    "engine": "<engine instance as confirmed>",
+    "model": "<model as confirmed>",
+    "effortRequested": "<level>",
+    "effortApplied": "<level or unknown>",
+    "session": "<thread/session id>",
+    "receipt": "<pointer to routing receipt>"
+  },
+  "expectedSurface": ["<path, dir/ or glob from the done-contract>"],
+  "changedFiles": ["<path>"],
+  "outsideExpectedSurface": [{ "path": "<path>", "reason": "<why>" }],
+  "checks": [
+    { "command": "<exact command>", "exitCode": 0, "summary": "<passed/failed counts>", "log": "<pointer>" }
+  ],
+  "screenshots": [{ "viewport": "<w x h>", "state": "<default/empty/error/...>", "path": "<path>" }],
+  "attempts": [{ "n": 1, "route": "<engine/model>", "result": "<ok|failure class>", "note": "<short>" }],
+  "limitations": ["<untested boundary or skip, with reason>"],
+  "producedBy": "builder|verifier",
+  "recordedAt": "<ISO-8601 with offset>"
+}

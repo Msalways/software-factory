@@ -1,0 +1,36 @@
+{
+  "id": "software-factory",
+  "release": "1.0.0",
+  "name": "Software Factory",
+  "tagline": "Gated multi-bot delivery: design, slice, route by live supply, verify independently, integrate.",
+  "summary": "A four-bot delivery team for existing projects. The Lead plans and slices work, routes each slice to an engine, model and effort chosen from live supply (nothing hardcoded), and falls back on usage, session or context limits. The Designer owns DESIGN.md and screenshot reviews, the Builder implements one slice per worktree, and the Verifier checks every done-contract independently. Every gate fails by default and passes only on evidence. The factory standards, templates and Node tools live in the software-factory repository.",
+  "notes": "1.0.0: first packaged release. Includes routing (factory-route), the verify gate (factory-gates) and the worktree janitor (factory-worktrees).",
+  "category": "Engineering",
+  "author": {"name": "Msalways", "url": "https://github.com/Msalways/software-factory"},
+  "license": "All rights reserved",
+  "repository": "github:Msalways/software-factory",
+  "tags": ["software-factory", "delivery", "multi-agent", "routing", "verification", "design"],
+  "outcomes": [
+    "Features delivered as small verified slices with evidence for every gate",
+    "Each slice routed to an engine, model and effort chosen from live supply, with automatic fallback on limits",
+    "UI work designed and reviewed against real screenshots",
+    "Slice worktrees cleaned up after merge so disk does not fill up"
+  ],
+  "setupMinutes": 10,
+  "requirements": {
+    "apps": [],
+    "capabilities": ["shell", "git", "node"],
+    "platforms": ["windows", "macos", "linux"]
+  },
+  "team": {
+    "name": "Software Factory",
+    "leader": "lead",
+    "brief": "Factory root: {{FACTORY_ROOT}}. Pipeline: Intake, Understand, R&D, Design (UI only), Slice, Route, Execute, Verify, Integrate, Release, Learn. Each gate fails by default and passes only on recorded evidence. Atlas leads and never implements or designs; Muse designs; Forge builds one slice per worktree; Verity verifies independently. Standards: {{FACTORY_ROOT}}/shared/standards (start with gates-and-handoffs.md). Tools: {{FACTORY_ROOT}}/tools."
+  },
+  "agents": [
+    {"key": "lead", "name": "Atlas", "title": "Software Factory Chief", "description": "Plans outcomes, slices work, routes each slice from live supply, integrates through a merge queue and keeps worktrees clean.", "appearance": {"color": "blue"}, "skills": ["factory-design-to-delivery"]},
+    {"key": "designer", "name": "Muse", "title": "Product Designer", "description": "Owns each project's DESIGN.md, reviews plans before build and the real UI (screenshots) after build for every user-facing slice.", "appearance": {"color": "pink"}, "skills": ["factory-design-to-delivery"]},
+    {"key": "builder", "name": "Forge", "title": "Implementation Engineer", "description": "Builds one scoped slice per worktree against a done-contract, with evidence.json and a continuation packet near limits.", "appearance": {"color": "orange"}, "skills": ["factory-design-to-delivery"]},
+    {"key": "verifier", "name": "Verity", "title": "Quality and Release Verification Engineer", "description": "Independently checks every done-contract item, re-runs the checks and exercises real journeys before integration.", "appearance": {"color": "teal"}, "skills": ["factory-design-to-delivery"]}
+  ]
+}
