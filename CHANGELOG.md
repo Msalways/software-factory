@@ -2,6 +2,11 @@
 
 Factory releases. `node tools/factory-sync.cjs plan <project>` lists the entries newer than the version a project last synced.
 
+## 1.2.0 (2026-11-11)
+- Mentor/worker slice briefs, bounded mentor questions and evidence-based escalation.
+- Owner-editable work-kind tier policy example; no fixed model identities.
+- Sync role renders keep rooms concise. This release does not apply changes to live bots.
+
 ## 1.1.0 (2026-11-10)
 - Project sync (`tools/factory-sync.cjs`) updates a project's Lead, Builder and Verifier instructions, its room bulletins and its `factory-*` skills to the current factory. It does not touch project memory, project notes or the project's other skills.
 - Project bot templates in `hattera/project/` (lead, builder, verifier), each with a marked factory block.

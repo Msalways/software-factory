@@ -77,3 +77,13 @@ Slice worktrees are temporary. Each one holds a full checkout and often `node_mo
   - **keep:** uncommitted changes, unpushed commits, or locked. Never removed by the janitor. Report them as follow-ups: commit and push, or the owner abandons them explicitly.
 - Never use `git worktree remove --force` or `git branch -D` on factory work without the user's explicit OK. Removing a worktree keeps its branch and commits.
 - The Learn step records in the feature ledger which worktrees were removed and which were kept, and why.
+
+## Mentor/worker handoff
+The Slice gate requires a project-local slice-brief.md with goal, interfaces,
+pitfalls, exact acceptance checks, mentor-question protocol and escalation rule.
+The Lead prepares the brief; a worker executes in its own thread/worktree on an
+owner-authorized worker route. Premium orchestration and review remain mentor work.
+The worker asks bounded questions in its own thread; guidance is not a takeover.
+Only two failures of the same check or a disproven brief justify a premium
+escalation request. Record the reason and actual execution. Rooms contain status,
+decisions and blockers; detailed reasoning and implementation stay in owned threads.
