@@ -1,0 +1,10 @@
+{
+  "capability": {"minOutcomes": 2, "minSuccessRate": 0.7},
+  "costRank": {"free": 0, "subscription": 1, "unknown": 2, "metered": 3},
+  "balanced": {
+    "weights": {"failureRate": 0.5, "cost": 0.3, "latency": 0.2},
+    "costScaleUsd": 0.01,
+    "latencyScaleMs": 60000,
+    "unknownPenalty": 1
+  }
+}

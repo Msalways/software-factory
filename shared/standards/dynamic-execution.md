@@ -26,6 +26,21 @@ Missing observations receive penalty 1; they are never assumed free or instant.
 `free-first` retains price-class priority. Measurements do not authorize routes
 or prove current provider readiness.
 
+All scoring defaults live in `tools/route-defaults.json`. Override individual
+`balanced.weights`, `balanced.costScaleUsd`, `balanced.latencyScaleMs`,
+`balanced.unknownPenalty`, `capability.minOutcomes`,
+`capability.minSuccessRate`, or `costRank` keys in `route-policy.json` under
+`FACTORY_STATE_DIR`. Omitted keys inherit the documented JSON defaults. Invalid
+numeric values fail routing; scales must be positive, weights nonnegative with
+at least one positive, success rate within [0,1], minimum outcomes a positive
+integer, and unknown penalty at least 1. Normalization scales are policy tuning
+parameters, not prices claimed for any model. Receipts show resolved values and
+their configuration paths. Model and engine identifiers have no scoring rules.
+
+Free status requires an explicit `priceReported: "free"` catalog field or an
+operator-confirmed cost class in policy. Names and labels do not establish free
+status. Existing catalogs without structured price evidence remain unknown.
+
 Record actual observations using optional `outcome` flags `--cost-usd <dollars>`
 and `--duration-ms <milliseconds>`. Omit unreported values rather than supplying
 zero. These are operator-recorded observations; automatic native execution

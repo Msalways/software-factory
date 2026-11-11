@@ -8,7 +8,7 @@ process.env.FACTORY_HATTERA_HOME = home; process.env.FACTORY_STATE_DIR = state;
 fs.mkdirSync(path.join(home, 'providers/engine-models'), {recursive: true}); fs.mkdirSync(path.join(home, 'usage'));
 fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({instances: {alpha: {driverKind: 'a'}, beta: {driverKind: 'b'}}}));
 fs.writeFileSync(path.join(home, 'providers/engine-models/alpha.json'), JSON.stringify({default: 'a-pro', options: [{id: 'a-pro', label: 'A Pro'}, {id: 'a-mini', label: 'A Mini'}]}));
-fs.writeFileSync(path.join(home, 'providers/engine-models/beta.json'), JSON.stringify({default: 'b-zen-free', options: [{id: 'b-zen-free', label: 'Zen Free', contextWindow: 32000}, {id: 'b-other', label: 'Other'}]}));
+fs.writeFileSync(path.join(home, 'providers/engine-models/beta.json'), JSON.stringify({default: 'b-zen-free', options: [{id: 'b-zen-free', label: 'Zen Free', priceReported: 'free', contextWindow: 32000}, {id: 'b-other', label: 'Other'}]}));
 const at = new Date().toISOString();
 fs.writeFileSync(path.join(home, 'usage/2026-11.jsonl'), [
   {instanceId: 'alpha', model: 'a-pro', input: 10, output: 5, at},
@@ -16,6 +16,16 @@ fs.writeFileSync(path.join(home, 'usage/2026-11.jsonl'), [
 ].map(x => JSON.stringify(x)).join('\n'));
 const R = require('./factory-route.cjs');
 const outcome = (e, m, c, r) => fs.appendFileSync(R.P.outcomes, JSON.stringify({engine: e, model: m, complexity: c, result: r}) + '\n');
+
+test('a free-sounding identifier never supplies price evidence', () => {
+  const catalog = path.join(home, 'providers/engine-models/alpha.json');
+  const original = fs.readFileSync(catalog, 'utf8');
+  try {
+    fs.writeFileSync(catalog, JSON.stringify({default: 'free-promo', options: [{id: 'free-promo', label: 'Free forever'}]}));
+    const model = R.supply().engines.find(e => e.id === 'alpha').models.find(m => m.id === 'free-promo');
+    assert.equal(model.priceReported, 'unknown');
+  } finally { fs.writeFileSync(catalog, original); }
+});
 
 test('classify recognises limit, too-big, transient and broken signals', () => {
   assert.equal(R.classify("You've hit your usage limit. Try again at 5pm").class, 'limit');
@@ -110,4 +120,38 @@ test('limit on one model blocks the whole engine by default and keeps the reset 
   R.recordLimit('alpha', 'a-pro', 'per-model limit', null, 'model');
   assert.ok(R.activeLimits().has('alpha/a-pro') && !R.activeLimits().has('alpha'));
   fs.writeFileSync(R.P.limits, '');
+});
+
+test('arbitrary identities use configured weights and thresholds; absent observations stay null', () => {
+  fs.writeFileSync(R.P.limits, '');
+  fs.writeFileSync(R.P.outcomes, '');
+  const snapshot = {observedAt: at, engines: ['provider-91', 'another-account-82'].map((id, i) => ({
+    id, defaultModel: `opaque-model-${i}`, models: [{id: `opaque-model-${i}`, inCatalog: true, priceReported: 'unknown'}],
+  }))};
+  try {
+    const missing = R.route({complexity: 'low', budget: 'balanced'}, {snapshot});
+    assert.equal(missing.choice.capability.ok, null);
+    assert.equal(missing.choice.cost, 'unknown');
+    assert.equal(missing.choice.measurements.successRate, null);
+    assert.equal(missing.choice.measurements.costUsdPerAttempt, null);
+    assert.equal(missing.choice.measurements.durationMsPerAttempt, null);
+    for (const [i, costUsd, durationMs] of [[0, 0.02, 10], [1, 0.001, 10000]]) {
+      fs.appendFileSync(R.P.outcomes, JSON.stringify({engine: snapshot.engines[i].id, model: `opaque-model-${i}`,
+        complexity: 'high', result: 'ok', costUsd, durationMs}) + '\n');
+    }
+    fs.writeFileSync(R.P.policy, JSON.stringify({capability: {minOutcomes: 1, minSuccessRate: 1},
+      balanced: {weights: {failureRate: 0, cost: 1, latency: 0}, costScaleUsd: 0.5}}));
+    const cheap = R.route({complexity: 'high', budget: 'balanced'}, {snapshot});
+    assert.equal(cheap.choice.engine, 'another-account-82');
+    assert.equal(cheap.choice.capability.ok, true);
+    assert.equal(cheap.scoring.costScaleUsd, 0.5);
+    fs.writeFileSync(R.P.policy, JSON.stringify({balanced: {weights: {failureRate: 0, cost: 0, latency: 1}}}));
+    const fast = R.route({complexity: 'low', budget: 'balanced'}, {snapshot});
+    assert.equal(fast.choice.engine, 'provider-91');
+    fs.writeFileSync(R.P.policy, JSON.stringify({balanced: {costScaleUsd: 0}}));
+    assert.throws(() => R.route({budget: 'balanced'}, {snapshot}), /invalid routing policy/);
+  } finally {
+    fs.unlinkSync(R.P.policy);
+    fs.writeFileSync(R.P.outcomes, '');
+  }
 });

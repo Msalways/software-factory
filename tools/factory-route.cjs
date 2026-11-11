@@ -16,6 +16,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
+const defaults = require('./route-defaults.json');
 
 const HOME = process.env.FACTORY_HATTERA_HOME || path.join(os.homedir(), '.openmausbot');
 const STATE = process.env.FACTORY_STATE_DIR || path.join(__dirname, '..', 'state', 'routing');
@@ -85,8 +86,8 @@ function supply() {
     const catIds = new Set((cat?.options || []).map(o => o.id));
     const models = (cat?.options || []).map(o => ({
       id: o.id, label: o.label, contextWindow: o.contextWindow ?? null,
-      // price as reported by the engine's own catalog label/id; otherwise unknown (never assumed $0)
-      priceReported: /(^|[^a-z])free([^a-z]|$)/i.test(`${o.id} ${o.label}`) ? 'free' : 'unknown',
+      // Only an explicit catalog field reports free status; names are not price evidence.
+      priceReported: o.priceReported === 'free' ? 'free' : 'unknown',
       inCatalog: true, usage: byModel[o.id] || null,
     }));
     for (const [id, u] of Object.entries(byModel)) if (!catIds.has(id))
@@ -136,15 +137,35 @@ function capability(policy) {
     LEVELS.forEach((l, i) => { const s = cap[k]?.[l]; if (!s) return;
       if (i >= li) { ok += s.ok; n += s.ok; }
       if (i <= li) n += s.n - s.ok; });
-    if (n >= 2 && ok / n >= 0.7) return {ok: true, source: `outcomes ${ok}/${n}`, rate: ok / n};
-    if (n >= 2) return {ok: false, source: `outcomes ${ok}/${n} below 70%`, rate: ok / n};
+    if (n >= policy.capability.minOutcomes && ok / n >= policy.capability.minSuccessRate) return {ok: true, source: `outcomes ${ok}/${n}`, rate: ok / n};
+    if (n >= policy.capability.minOutcomes) return {ok: false, source: `outcomes ${ok}/${n} below ${policy.capability.minSuccessRate * 100}%`, rate: ok / n};
     return {ok: null, source: n ? `outcomes ${ok}/${n} (too few)` : 'no outcomes yet', rate: n ? ok / n : null};
   };
   return proven;
 }
 
 // ---------- router
-const COST_RANK = {free: 0, subscription: 1, unknown: 2, metered: 3};
+function scoringPolicy(raw) {
+  const policy = {...raw,
+    capability: {...defaults.capability, ...raw.capability},
+    costRank: {...defaults.costRank, ...raw.costRank},
+    balanced: {...defaults.balanced, ...raw.balanced,
+      weights: {...defaults.balanced.weights, ...raw.balanced?.weights}}};
+  const finite = (name, value, min, max = Infinity) => {
+    if (!Number.isFinite(value) || value < min || value > max) throw Error(`invalid routing policy ${name}`);
+  };
+  finite('capability.minOutcomes', policy.capability.minOutcomes, 1);
+  if (!Number.isInteger(policy.capability.minOutcomes)) throw Error('minOutcomes must be an integer');
+  finite('capability.minSuccessRate', policy.capability.minSuccessRate, 0, 1);
+  for (const key of Object.keys(defaults.costRank)) finite(`costRank.${key}`, policy.costRank[key], 0);
+  for (const key of Object.keys(defaults.balanced.weights)) finite(`balanced.weights.${key}`, policy.balanced.weights[key], 0);
+  if (!Object.values(policy.balanced.weights).some(v => v > 0)) throw Error('balanced weights must not all be zero');
+  for (const key of ['costScaleUsd', 'latencyScaleMs']) {
+    finite(`balanced.${key}`, policy.balanced[key], Number.MIN_VALUE);
+  }
+  finite('balanced.unknownPenalty', policy.balanced.unknownPenalty, 1);
+  return policy;
+}
 function effortFor(engineId, complexity, attempt, policy) {
   const levels = policy.engines?.[engineId]?.effortLevels;
   if (!levels || !levels.length) return {requested: 'engine-default', note: 'engine advertises no effort levels in policy; set engines.<id>.effortLevels from the engine'};
@@ -154,7 +175,8 @@ function effortFor(engineId, complexity, attempt, policy) {
   return {requested: levels[i]};
 }
 function route(profile, opts = {}) {
-  const policy = readJson(P.policy, {});
+  const policy = scoringPolicy(readJson(P.policy, {}));
+  const COST_RANK = policy.costRank;
   const snap = opts.snapshot || supply();
   const limits = activeLimits();
   const proven = capability(policy);
@@ -230,9 +252,10 @@ function route(profile, opts = {}) {
   // Missing observations receive a penalty of one, never a zero-cost assumption.
   const balancedScore = c => {
     const m = c.measurements;
-    return 0.5 * (1 - (m.successRate ?? 0))
-      + 0.3 * (m.costUsdPerAttempt === null ? 1 : m.costUsdPerAttempt / (m.costUsdPerAttempt + 0.01))
-      + 0.2 * (m.durationMsPerAttempt === null ? 1 : m.durationMsPerAttempt / (m.durationMsPerAttempt + 60000));
+    const b = policy.balanced;
+    return b.weights.failureRate * (m.successRate === null ? b.unknownPenalty : 1 - m.successRate)
+      + b.weights.cost * (m.costUsdPerAttempt === null ? b.unknownPenalty : m.costUsdPerAttempt / (m.costUsdPerAttempt + b.costScaleUsd))
+      + b.weights.latency * (m.durationMsPerAttempt === null ? b.unknownPenalty : m.durationMsPerAttempt / (m.durationMsPerAttempt + b.latencyScaleMs));
   };
   const score = c => [
     avoid.has(c.engine) ? 1 : 0,
@@ -252,7 +275,8 @@ function route(profile, opts = {}) {
     profile: {complexity: cx, budget, needs, attempt: profile.attempt || 1},
     choice: pool[0] || null,
     coldStart,
-    scoring: budget === 'balanced' ? {policy: 'balanced', weights: {failureRate: 0.5, cost: 0.3, latency: 0.2}, costScaleUsd: 0.01, latencyScaleMs: 60000, unknownPenalty: 1} : {policy: budget},
+    scoring: {policy: budget, ...(budget === 'balanced' ? policy.balanced : {}), capability: policy.capability, costRank: policy.costRank,
+      defaultsSource: 'tools/route-defaults.json', overridesSource: P.policy},
     reason: pool[0] ? `${coldStart ? 'COLD START (no proven candidate; record outcomes) — ' : ''}${budget === 'balanced' ? 'lowest measured balanced penalty' : 'cheapest-capable'} for ${cx}/${budget}: cost=${pool[0].cost}, capability=${pool[0].capability.source}${pool[0].flags.length ? ', flags=' + pool[0].flags.join('; ') : ''}` :
       'no candidate: mark slice waiting-for-quota or escalate (see rejected)',
     fallbacks: pool.slice(1, 4),
