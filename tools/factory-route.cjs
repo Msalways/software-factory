@@ -18,6 +18,7 @@ const path = require('node:path');
 const os = require('node:os');
 const defaults = require('./route-defaults.json');
 const opencode = require('./opencode-discovery.cjs');
+const sliceReceipt = require('./slice-receipt.cjs');
 
 const HOME = process.env.FACTORY_HATTERA_HOME || path.join(os.homedir(), '.openmausbot');
 const STATE = process.env.FACTORY_STATE_DIR || path.join(__dirname, '..', 'state', 'routing');
@@ -375,8 +376,15 @@ function route(profile, opts = {}) {
   };
   if (fallbackReason) receipt.reason += `; ${fallbackReason}`;
   if (receipt.needsUserChoice) { receipt.fallback = true; receipt.fallbackReason ||= oc.reason; receipt.reason += `; ${oc.reason}; OpenCode excluded`; }
+  receipt.planned = {engine: receipt.choice?.engine ?? null, model: receipt.choice?.model ?? null,
+    effort: receipt.choice?.effort?.requested ?? null, workKind: receipt.workKind, tier: receipt.tier,
+    fallback: receipt.fallback, fallbackReason: receipt.fallbackReason};
+  receipt.actual = {engine: null, model: null, effort: null, confirmedBy: 'unconfirmed'};
+  receipt.usage = {inputTokens: null, outputTokens: null, promptBytes: null, source: 'unreported'};
+  receipt.handoffs = 0; receipt.mentorQuestions = 0; receipt.escalations = []; receipt.outcome = null;
+  receipt.timestamps = {createdAt: receipt.decidedAt, updatedAt: receipt.decidedAt, closedAt: null};
   fs.mkdirSync(P.receipts, {recursive: true});
-  const f = path.join(P.receipts, `${(profile.slice || 'adhoc').replace(/[^\w.-]/g, '_')}-${Date.now()}.json`);
+  const f = path.join(P.receipts, `${(profile.slice || 'adhoc').replace(/[^\w.-]/g, '_')}-${Date.now()}-${require('node:crypto').randomUUID()}.json`);
   fs.writeFileSync(f, JSON.stringify(receipt, null, 2)); receipt.file = f;
   return receipt;
 }
@@ -390,7 +398,12 @@ if (require.main === module) {
   const json = has('--json');
   const cmd = a.shift();
   try {
-    if (cmd === 'opencode-discover') {
+    if (cmd === 'receipt') {
+      const [file, action, data] = a;
+      const payload = ['report', 'escalate'].includes(action) ? JSON.parse(readIn(data).replace(/^\uFEFF/, '')) : data;
+      const result = action === 'show' ? sliceReceipt.load(file) : sliceReceipt.update(file, action, payload);
+      console.log(JSON.stringify(result, null, 2));
+    } else if (cmd === 'opencode-discover') {
       fs.mkdirSync(STATE, {recursive: true});
       console.log(JSON.stringify(opencode.discover(P.discovery), null, 2));
     } else if (cmd === 'opencode-prefer') {
@@ -448,7 +461,7 @@ if (require.main === module) {
       Object.assign(o, measured);
       append(P.outcomes, o); console.log(JSON.stringify(o));
     } else {
-      console.error('commands: supply | route | limit | detect | outcome | classify  (see header)'); process.exit(2);
+      console.error('commands: supply | route | receipt | opencode-discover | opencode-prefer | limit | detect | outcome | classify (see header)'); process.exit(2);
     }
   } catch (e) { console.error(e.message); process.exit(2); }
 }

@@ -59,6 +59,51 @@ correlation remains unimplemented.
 - Editable data: `state/routing/route-policy.json` holds effort levels as engines report them, cost class when the user states it, and overrides. Change only from engine-reported or user-given facts.
 
 ## 4. Limits: quota, session and context
+
+### Per-slice receipt updates
+`route` saves the existing routing data plus `planned`, `actual`, `usage`,
+`handoffs`, `mentorQuestions`, `escalations`, `outcome` and `timestamps`.
+Every routing attempt has its own unique receipt file. Legacy files load with
+unknown execution/usage and zero event counters; reading does not rewrite them.
+
+Use `node tools/factory-route.cjs receipt <receipt.json> <action> [data]`:
+- `show`: read the receipt, including legacy defaults.
+- `handoff` or `mentor`: increment the corresponding event counter once.
+- `escalate <event.json>`: append `{fromTier,toTier,reason,note}` with server time.
+  Reason must be `check-failed-twice`, `brief-wrong` or `other`; note is required.
+- `report <report.json>`: manually import engine/Hattera-reported evidence. The
+  envelope requires `source` (`engine` or `hattera`), `reference` (the captured
+  event/ledger row pointer), and optional `actual: {engine,model,effort}` or
+  `usage: {inputTokens,outputTokens,promptBytes}`. Never derive actual from planned.
+  Omitted effort stays null. Usage values must be positive reported integers or
+  null; missing measurements use `unreported`, never a zero placeholder. Partial
+  usage records include per-field `sources`; each import replaces the usage
+  snapshot, so provide all known measurements together.
+- `close <passed|failed|split|escalated|abandoned>`: close once. All subsequent
+  writes, including another close, fail. Updates use an exclusive lock and atomic
+  file replacement; a crashed lock requires explicit operator recovery.
+
+Reported evidence sources today: Hattera `server/runtime.ts::bookTurnUsage`
+calls `server/usage-ledger.ts::appendUsage`, writing `<data>/usage/YYYY-MM.jsonl`.
+`UsageRow` exposes instanceId/model, input/output, tokensReported, threadId,
+and optional promptBytes `{stable,volatile}`. Honor tokensReported=false as
+unreported; ledger zero placeholders do not prove measured usage. The ledger's
+model attribution uses configured selections in current runtime branches; it is
+not independent confirmation of the executed model or applied effort. Engine-reported turn/session
+events may confirm model and effort where present. No universal effort-report
+adapter exists here. Prompt bytes may be summed from the reported split only
+when both components are present; never manufacture them from token estimates.
+For example `server/drivers/codex.ts` emits session.started with a model, but
+that field may fall back to the request when the provider omits it. Preserve
+the original provider acknowledgement as evidence; do not promote that fallback
+to confirmed execution. This receipt importer does not decode that distinction.
+
+This command is an operator evidence import, not an automatic verifier of the
+reference or payload. Automatic event decoding, ledger ingestion, and correlation
+between a factory slice and Hattera execution remain unimplemented. The existing
+`outcome` command still records capability observations independently; closing a
+receipt does not invent an execution or capability outcome.
+
 - **Preflight before every dispatch:** check each candidate account's recent limit events and, where readable, its 5-hour and weekly usage windows. Skip candidates without headroom for the slice's size. Treat quota reads older than about 5 minutes as stale.
 - **Limit signals:** typed errors, and CLI or engine output such as "usage limit", "5-hour limit", "session limit", "rate limit", HTTP 429, or 5xx. Record the signal verbatim with its time.
 - **Context budget:** at about 70% of the window, compact or trim the context. At about 90%, write a **continuation packet** and continue in a fresh session.
