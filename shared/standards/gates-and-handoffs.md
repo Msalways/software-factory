@@ -87,3 +87,5 @@ The worker asks bounded questions in its own thread; guidance is not a takeover.
 Only two failures of the same check or a disproven brief justify a premium
 escalation request. Record the reason and actual execution. Rooms contain status,
 decisions and blockers; detailed reasoning and implementation stay in owned threads.
+
+Before worker dispatch, run node tools/factory-gates.cjs brief <project-brief>. The gate rejects missing or unfilled required sections. Record the brief path as evidence.brief so verification checks it too. This is a structural gate; the Lead still reviews whether examples, signatures and expected results are sufficient.
