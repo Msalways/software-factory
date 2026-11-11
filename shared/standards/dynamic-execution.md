@@ -17,6 +17,19 @@ Atlas or the project Lead chooses engine, model and effort **per slice, from liv
 6. Mark the slice *running* only once the engine has accepted the execution identity (thread or session ID, engine, model).
 
 ## 3. How to dispatch today
+
+`balanced` retains eligibility and hard-need filters, then ranks observed attempt
+failure rate (weight 0.5), cost (0.3), and latency (0.2). Cost is normalized as
+dollars / (dollars + 0.01); latency as milliseconds / (milliseconds + 60000).
+Receipts expose weights, scales, scores, sample counts and null missing values.
+Missing observations receive penalty 1; they are never assumed free or instant.
+`free-first` retains price-class priority. Measurements do not authorize routes
+or prove current provider readiness.
+
+Record actual observations using optional `outcome` flags `--cost-usd <dollars>`
+and `--duration-ms <milliseconds>`. Omit unreported values rather than supplying
+zero. These are operator-recorded observations; automatic native execution
+correlation remains unimplemented.
 - **Native teammates:** the receiving bot runs on its own default model, because Hattera's handoff has no per-task model override. Routing natively means choosing the bot whose engine matches the receipt. Chiefs' setup catalog lists only models already chosen on some bot, so an engine with no bot stays invisible until a bot uses it.
 - **Engine CLI in the slice worktree** (when shell access is authorised): for example `opencode.cmd run --model <discovered-provider/model> --format json --file <brief>`. Use a fresh session per independent slice, and resume only that slice's own recorded session. Keep approval boundaries; never use `--auto` to bypass them.
 - Still needed in Hattera: per-task model and effort in delegation, and a full engine catalog for Chiefs.

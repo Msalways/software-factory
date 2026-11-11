@@ -75,6 +75,30 @@ test('cold start for high complexity prefers routes that actually ran; image nee
   fs.unlinkSync(R.P.policy);
 });
 
+test('balanced trades measured reliability, cost and latency while free-first keeps price priority', () => {
+  fs.writeFileSync(R.P.limits, '');
+  fs.writeFileSync(R.P.outcomes, '');
+  for (let i = 0; i < 10; i++) {
+    for (const [engine, model, result, costUsd, durationMs] of [
+      ['alpha', 'a-pro', 'ok', 0.001, 1000],
+      ['beta', 'b-zen-free', i < 7 ? 'ok' : 'broken', 0, 600000],
+    ]) fs.appendFileSync(R.P.outcomes, JSON.stringify({engine, model, complexity: 'high', result, costUsd, durationMs}) + '\n');
+  }
+  const free = R.route({complexity: 'high', budget: 'free-first'});
+  const balanced = R.route({complexity: 'high', budget: 'balanced'});
+  assert.equal(free.choice.engine, 'beta');
+  assert.equal(balanced.choice.engine, 'alpha');
+  assert.equal(balanced.choice.measurements.costSamples, 10);
+  assert.equal(balanced.choice.measurements.durationMsPerAttempt, 1000);
+  assert.equal(balanced.scoring.unknownPenalty, 1);
+  assert.ok(balanced.choice.score.every(Number.isFinite));
+  fs.writeFileSync(R.P.outcomes, '');
+  const unknown = R.route({complexity: 'low', budget: 'balanced'});
+  assert.equal(unknown.choice.measurements.costUsdPerAttempt, null);
+  assert.equal(unknown.choice.measurements.durationMsPerAttempt, null);
+  assert.ok(unknown.choice.flags.includes('observed cost unknown'));
+});
+
 test('limit on one model blocks the whole engine by default and keeps the reset hint', () => {
   fs.writeFileSync(R.P.limits, '');
   const e = R.recordLimit('alpha', 'a-pro', "Error: You've hit your usage limit. Try again at 3:15 PM.", null);

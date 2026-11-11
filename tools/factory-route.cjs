@@ -28,7 +28,7 @@ const P = {
   outcomes: path.join(STATE, 'outcomes.jsonl'),
   policy: path.join(STATE, 'route-policy.json'),
   receipts: path.join(STATE, 'receipts'),
-};
+      };
 const LEVELS = ['low', 'medium', 'high'];
 const H = 3600e3;
 const now = () => Date.now();
@@ -158,6 +158,17 @@ function route(profile, opts = {}) {
   const snap = opts.snapshot || supply();
   const limits = activeLimits();
   const proven = capability(policy);
+  // Observations are per completed attempt, not catalog claims or authorization.
+  const observations = new Map();
+  for (const o of readJsonl(P.outcomes)) {
+    if (o.result === 'limit' || o.result === 'transient') continue;
+    const key = `${o.engine}/${o.model}`;
+    const s = observations.get(key) || {runs: 0, ok: 0, costs: [], durations: []};
+    s.runs++; if (o.result === 'ok') s.ok++;
+    if (Number.isFinite(o.costUsd) && o.costUsd >= 0) s.costs.push(o.costUsd);
+    if (Number.isFinite(o.durationMs) && o.durationMs >= 0) s.durations.push(o.durationMs);
+    observations.set(key, s);
+  }
   const cx = LEVELS.includes(profile.complexity) ? profile.complexity : 'medium';
   const budget = profile.budget || 'free-first';
   const needs = profile.needs || {};
@@ -192,7 +203,16 @@ function route(profile, opts = {}) {
       if (e.catalogStale) flags.push('catalog stale: re-probe engine');
       if (!m.usage) flags.push('never run here');
       if (avoid.has(e.id)) flags.push('engine busy with a parallel slice');
+      const observed = observations.get(key);
+      const mean = a => a?.length ? a.reduce((x, y) => x + y, 0) / a.length : null;
+      const measurements = {source: 'outcomes.jsonl', runs: observed?.runs || 0,
+        successRate: observed ? observed.ok / observed.runs : null,
+        costUsdPerAttempt: mean(observed?.costs), costSamples: observed?.costs.length || 0,
+        durationMsPerAttempt: mean(observed?.durations), durationSamples: observed?.durations.length || 0};
+      if (budget === 'balanced' && measurements.costUsdPerAttempt === null) flags.push('observed cost unknown');
+      if (budget === 'balanced' && measurements.durationMsPerAttempt === null) flags.push('observed latency unknown');
       cands.push({engine: e.id, model: m.id, label: m.label, cost, capability: cap, flags,
+        measurements,
         effort: effortFor(e.id, cx, profile.attempt, policy), usage5hTokens: m.usage?.tokens5h ?? 0, runs: m.usage?.runs ?? 0});
     }
   }
@@ -205,25 +225,35 @@ function route(profile, opts = {}) {
     for (const c of cands.filter(c => c.capability.ok !== true)) rejected.push({candidate: `${c.engine}/${c.model}`, reason: `unproven for ${cx}; proven candidates exist`});
     pool = provenSet;
   }
-  const needUnknown = c => c.flags.filter(f => / unknown$/.test(f)).length;
+  const needUnknown = c => c.flags.filter(f => /^(image input|context size) unknown$/.test(f)).length;
+  // Fixed scales keep a route's score independent of which alternatives are present.
+  // Missing observations receive a penalty of one, never a zero-cost assumption.
+  const balancedScore = c => {
+    const m = c.measurements;
+    return 0.5 * (1 - (m.successRate ?? 0))
+      + 0.3 * (m.costUsdPerAttempt === null ? 1 : m.costUsdPerAttempt / (m.costUsdPerAttempt + 0.01))
+      + 0.2 * (m.durationMsPerAttempt === null ? 1 : m.durationMsPerAttempt / (m.durationMsPerAttempt + 60000));
+  };
   const score = c => [
     avoid.has(c.engine) ? 1 : 0,
     needUnknown(c),                                   // a hard need we cannot confirm outranks price
     coldStart && c.flags.includes('never run here') ? 1 : 0,
     coldStart ? -(c.runs || 0) : 0,                   // cold start: prefer routes that actually ran here
-    budget === 'best-quality' ? -(c.capability.rate ?? 0) : COST_RANK[c.cost] ?? 2,
+    budget === 'balanced' ? balancedScore(c) : budget === 'best-quality' ? -(c.capability.rate ?? 0) : COST_RANK[c.cost] ?? 2,
     c.capability.ok === true ? 0 : 1,
     budget === 'best-quality' ? COST_RANK[c.cost] ?? 2 : -(c.capability.rate ?? 0),
     c.flags.length,
     c.usage5hTokens,
   ];
+  for (const c of pool) c.score = score(c);
   pool.sort((a, b) => { const x = score(a), y = score(b); for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return x[i] - y[i]; return 0; });
   const receipt = {
     slice: profile.slice || null, decidedAt: new Date().toISOString(), supplyObservedAt: snap.observedAt,
     profile: {complexity: cx, budget, needs, attempt: profile.attempt || 1},
     choice: pool[0] || null,
     coldStart,
-    reason: pool[0] ? `${coldStart ? 'COLD START (no proven candidate; record outcomes) — ' : ''}cheapest-capable for ${cx}/${budget}: cost=${pool[0].cost}, capability=${pool[0].capability.source}${pool[0].flags.length ? ', flags=' + pool[0].flags.join('; ') : ''}` :
+    scoring: budget === 'balanced' ? {policy: 'balanced', weights: {failureRate: 0.5, cost: 0.3, latency: 0.2}, costScaleUsd: 0.01, latencyScaleMs: 60000, unknownPenalty: 1} : {policy: budget},
+    reason: pool[0] ? `${coldStart ? 'COLD START (no proven candidate; record outcomes) — ' : ''}${budget === 'balanced' ? 'lowest measured balanced penalty' : 'cheapest-capable'} for ${cx}/${budget}: cost=${pool[0].cost}, capability=${pool[0].capability.source}${pool[0].flags.length ? ', flags=' + pool[0].flags.join('; ') : ''}` :
       'no candidate: mark slice waiting-for-quota or escalate (see rejected)',
     fallbacks: pool.slice(1, 4),
     rejected, activeLimits: [...limits.values()],
@@ -276,9 +306,18 @@ if (require.main === module) {
       console.log(JSON.stringify(classify(readIn(a[0]))));
     } else if (cmd === 'outcome') {
       const slice = flag('--slice'), note = flag('--note');
+      const cost = flag('--cost-usd'), duration = flag('--duration-ms');
+      const measured = {};
+      for (const [key, raw] of [['costUsd', cost], ['durationMs', duration]]) {
+        if (raw === undefined) continue;
+        const value = Number(raw);
+        if (!raw.trim() || !Number.isFinite(value) || value < 0) throw Error(`${key} must be a finite nonnegative measurement`);
+        measured[key] = value;
+      }
       const [engine, model, complexity, result] = a;
       if (!LEVELS.includes(complexity) || !['ok', 'transient', 'limit', 'broken', 'too-big', 'spec', 'repeated'].includes(result)) throw Error('usage: outcome <engine> <model> <low|medium|high> <ok|transient|limit|broken|too-big|spec|repeated>');
       const o = {at: new Date().toISOString(), engine, model, complexity, result, slice: slice || null, note: note || null};
+      Object.assign(o, measured);
       append(P.outcomes, o); console.log(JSON.stringify(o));
     } else {
       console.error('commands: supply | route | limit | detect | outcome | classify  (see header)'); process.exit(2);
