@@ -145,7 +145,40 @@ function capability(policy) {
 }
 
 // ---------- router
+function readPolicy() {
+  let text;
+  try { text = fs.readFileSync(P.policy, 'utf8'); }
+  catch (error) {
+    if (error.code === 'ENOENT') return {};
+    throw new Error(`Cannot read routing policy ${P.policy}: ${error.message}`, {cause: error});
+  }
+  try {
+    const policy = JSON.parse(text.replace(/^\uFEFF/, ''));
+    if (!policy || typeof policy !== 'object' || Array.isArray(policy)) throw Error('expected an object');
+    return policy;
+  } catch (error) { throw new Error(`Invalid routing policy ${P.policy}: ${error.message}`, {cause: error}); }
+}
+
+// For nonnegative finite observations, differences and incremental means cannot
+// overflow as a raw sum can. Empty samples alone represent unknown measurements.
+const mean = values => {
+  if (!values?.length) return null;
+  const average = values.reduce((m, x, i) => m + (x - m) / (i + 1), 0);
+  // A positive mean below the representable range stays positive rather than
+  // becoming evidence of zero cost/latency through floating-point underflow.
+  return average || (values.some(x => x > 0) ? Number.MIN_VALUE : 0);
+};
+const normalizedPenalty = (value, scale) => value <= scale
+  ? (value / scale) / (1 + value / scale)
+  : 1 / (1 + scale / value);
+
 function scoringPolicy(raw) {
+  for (const [key, value] of [...['capability', 'costRank', 'balanced', 'engines', 'models'].map(k => [k, raw[k]]),
+    ['balanced.weights', raw.balanced?.weights]]) {
+    if (value !== undefined && (!value || typeof value !== 'object' || Array.isArray(value))) {
+      throw Error(`invalid routing policy ${key}: expected an object`);
+    }
+  }
   const policy = {...raw,
     capability: {...defaults.capability, ...raw.capability},
     costRank: {...defaults.costRank, ...raw.costRank},
@@ -175,7 +208,7 @@ function effortFor(engineId, complexity, attempt, policy) {
   return {requested: levels[i]};
 }
 function route(profile, opts = {}) {
-  const policy = scoringPolicy(readJson(P.policy, {}));
+  const policy = scoringPolicy(readPolicy());
   const COST_RANK = policy.costRank;
   const snap = opts.snapshot || supply();
   const limits = activeLimits();
@@ -226,7 +259,6 @@ function route(profile, opts = {}) {
       if (!m.usage) flags.push('never run here');
       if (avoid.has(e.id)) flags.push('engine busy with a parallel slice');
       const observed = observations.get(key);
-      const mean = a => a?.length ? a.reduce((x, y) => x + y, 0) / a.length : null;
       const measurements = {source: 'outcomes.jsonl', runs: observed?.runs || 0,
         successRate: observed ? observed.ok / observed.runs : null,
         costUsdPerAttempt: mean(observed?.costs), costSamples: observed?.costs.length || 0,
@@ -253,9 +285,22 @@ function route(profile, opts = {}) {
   const balancedScore = c => {
     const m = c.measurements;
     const b = policy.balanced;
-    return b.weights.failureRate * (m.successRate === null ? b.unknownPenalty : 1 - m.successRate)
-      + b.weights.cost * (m.costUsdPerAttempt === null ? b.unknownPenalty : m.costUsdPerAttempt / (m.costUsdPerAttempt + b.costScaleUsd))
-      + b.weights.latency * (m.durationMsPerAttempt === null ? b.unknownPenalty : m.durationMsPerAttempt / (m.durationMsPerAttempt + b.latencyScaleMs));
+    const terms = [
+      [b.weights.failureRate, m.successRate === null ? b.unknownPenalty : 1 - m.successRate],
+      [b.weights.cost, m.costUsdPerAttempt === null ? b.unknownPenalty : normalizedPenalty(m.costUsdPerAttempt, b.costScaleUsd)],
+      [b.weights.latency, m.durationMsPerAttempt === null ? b.unknownPenalty : normalizedPenalty(m.durationMsPerAttempt, b.latencyScaleMs)],
+    ];
+    // A relative weighted mean preserves ranking and avoids overflowing either
+    // weight sums or weight*penalty products for accepted finite policy values.
+    const scale = Math.max(...terms.map(([w]) => w));
+    let score = 0, total = 0;
+    for (const [weight, penalty] of terms) {
+      const w = weight / scale;
+      if (!w) continue;
+      total += w;
+      score += (penalty - score) * (w / total);
+    }
+    return score;
   };
   const score = c => [
     avoid.has(c.engine) ? 1 : 0,

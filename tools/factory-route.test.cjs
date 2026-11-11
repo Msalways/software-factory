@@ -15,6 +15,8 @@ fs.writeFileSync(path.join(home, 'usage/2026-11.jsonl'), [
   {instanceId: 'beta', model: 'b-gone-free', input: 1, output: 1, at},
 ].map(x => JSON.stringify(x)).join('\n'));
 const R = require('./factory-route.cjs');
+const opaqueSnapshot = {observedAt: at, engines: [{id: 'opaque-account', defaultModel: 'opaque-route',
+  models: [{id: 'opaque-route', inCatalog: true, priceReported: 'unknown'}]}]};
 const outcome = (e, m, c, r) => fs.appendFileSync(R.P.outcomes, JSON.stringify({engine: e, model: m, complexity: c, result: r}) + '\n');
 
 test('a free-sounding identifier never supplies price evidence', () => {
@@ -153,5 +155,75 @@ test('arbitrary identities use configured weights and thresholds; absent observa
   } finally {
     fs.unlinkSync(R.P.policy);
     fs.writeFileSync(R.P.outcomes, '');
+  }
+});
+
+test('only a missing policy defaults; invalid or unreadable policy fails before receipts', () => {
+  const receipts = () => fs.existsSync(R.P.receipts) ? fs.readdirSync(R.P.receipts).sort() : [];
+  try {
+    fs.rmSync(R.P.policy, {force: true});
+    assert.ok(R.route({complexity: 'low'}, {snapshot: opaqueSnapshot}).choice);
+    const before = receipts();
+    for (const text of ['{bad json', 'null', '[]', '"not an object"']) {
+      fs.writeFileSync(R.P.policy, text);
+      assert.throws(() => R.route({budget: 'balanced'}, {snapshot: opaqueSnapshot}), /Invalid routing policy/);
+      assert.deepEqual(receipts(), before);
+    }
+    fs.unlinkSync(R.P.policy);
+    for (const policy of [{balanced: 42}, {balanced: {weights: null}}, {capability: []}]) {
+      fs.writeFileSync(R.P.policy, JSON.stringify(policy));
+      assert.throws(() => R.route({}, {snapshot: opaqueSnapshot}), /invalid routing policy/);
+      assert.deepEqual(receipts(), before);
+    }
+    fs.unlinkSync(R.P.policy);
+    // A directory at the policy path produces a real read failure on Windows
+    // and POSIX, without relying on platform-specific chmod behavior.
+    fs.mkdirSync(R.P.policy);
+    assert.throws(() => R.route({}, {snapshot: opaqueSnapshot}), /Cannot read routing policy/);
+    assert.deepEqual(receipts(), before);
+    fs.rmdirSync(R.P.policy);
+    fs.writeFileSync(R.P.policy, '{}');
+    assert.ok(R.route({complexity: 'low'}, {snapshot: opaqueSnapshot}).choice);
+  } finally {
+    if (fs.existsSync(R.P.policy) && fs.statSync(R.P.policy).isDirectory()) fs.rmdirSync(R.P.policy);
+    else fs.rmSync(R.P.policy, {force: true});
+  }
+});
+
+test('finite extreme observations retain finite measured means and persisted scores', () => {
+  fs.writeFileSync(R.P.limits, '');
+  try {
+    for (const value of [1e308, Number.MAX_VALUE, Number.MIN_VALUE, 0]) {
+      fs.writeFileSync(R.P.outcomes, [1, 2].map(() => JSON.stringify({engine: 'opaque-account', model: 'opaque-route',
+        complexity: 'low', result: 'ok', costUsd: value, durationMs: value})).join('\n'));
+      const r = R.route({complexity: 'low', budget: 'balanced'}, {snapshot: opaqueSnapshot});
+      const saved = JSON.parse(fs.readFileSync(r.file, 'utf8')).choice;
+      assert.equal(saved.measurements.costUsdPerAttempt, value);
+      assert.equal(saved.measurements.durationMsPerAttempt, value);
+      assert.equal(saved.measurements.costSamples, 2);
+      assert.ok(saved.score.every(Number.isFinite));
+      assert.ok(!saved.flags.includes('observed cost unknown'));
+    }
+    fs.writeFileSync(R.P.outcomes, [0, Number.MIN_VALUE].map(value => JSON.stringify({engine: 'opaque-account', model: 'opaque-route',
+      complexity: 'low', result: 'ok', costUsd: value, durationMs: value})).join('\n'));
+    const tiny = R.route({complexity: 'low', budget: 'balanced'}, {snapshot: opaqueSnapshot});
+    assert.ok(tiny.choice.measurements.costUsdPerAttempt > 0);
+    assert.ok(tiny.choice.measurements.durationMsPerAttempt > 0);
+    // Large valid policy scales must not overflow value+scale; large weights
+    // must not overflow their sum or their products with unknown penalties.
+    fs.writeFileSync(R.P.policy, JSON.stringify({balanced: {costScaleUsd: Number.MAX_VALUE,
+      latencyScaleMs: Number.MAX_VALUE, weights: {failureRate: 0, cost: 1e308, latency: 1e308}, unknownPenalty: 1e308}}));
+    fs.writeFileSync(R.P.outcomes, JSON.stringify({engine: 'opaque-account', model: 'opaque-route',
+      complexity: 'low', result: 'ok', costUsd: Number.MAX_VALUE, durationMs: Number.MAX_VALUE}));
+    const measured = R.route({complexity: 'low', budget: 'balanced'}, {snapshot: opaqueSnapshot});
+    assert.equal(measured.choice.score[4], 0.5);
+    fs.writeFileSync(R.P.outcomes, '');
+    const unknown = R.route({complexity: 'low', budget: 'balanced'}, {snapshot: opaqueSnapshot});
+    assert.equal(unknown.choice.measurements.costUsdPerAttempt, null);
+    assert.ok(unknown.choice.score.every(Number.isFinite));
+    assert.equal(unknown.choice.score[4], 1e308);
+  } finally {
+    fs.writeFileSync(R.P.outcomes, '');
+    fs.rmSync(R.P.policy, {force: true});
   }
 });
