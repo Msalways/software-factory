@@ -144,7 +144,9 @@ preference, never authorization. Reuse it without asking on every dispatch.
 Missing preference, a retired choice, newly responding options, failed discovery
 or discovery older than one day excludes OpenCode and reports the choice needed.
 Only chosen, confirmed, catalog-listed and owner-authorized identities can route.
-Chosen identities join the implementation tier declared by workKindTiers.
+Preference only filters identities; it never assigns a tier. Declare each model's
+tier explicitly in models["engine/model"].tier. Missing or different declarations
+are recorded in tierExclusions; an empty requested tier uses explicit fallback.
 No bots or owner configuration are changed by these commands.
 
 Work kind and model tiers are owner-editable policy data in route-policy.example.json.

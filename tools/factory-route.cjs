@@ -301,12 +301,18 @@ function route(profile, opts = {}) {
     }
   }
   let eligible = cands, fallback = false, fallbackReason = null;
+  const tierExclusions = [];
   if (workKind) {
-    const inTier = tier ? cands.filter(c => policy.models?.[`${c.engine}/${c.model}`]?.tier === tier ||
-      (tier === policy.workKindTiers?.implement && snap.engines.some(e => e.id === c.engine && e.driver === 'opencodeGo') && oc.chosen.includes(c.model))) : [];
+    // Preference limits candidates; only explicit policy data assigns tiers.
+    const inTier = tier ? cands.filter(c => policy.models?.[`${c.engine}/${c.model}`]?.tier === tier) : [];
+    for (const c of cands.filter(c => !inTier.includes(c))) {
+      const policyTier = policy.models?.[`${c.engine}/${c.model}`]?.tier ?? null;
+      tierExclusions.push({candidate: `${c.engine}/${c.model}`, policyTier,
+        reason: policyTier === null ? `no policy tier declared; ineligible for tier ${tier ?? '(unmapped)'} for work kind ${workKind}` : `policy tier ${policyTier} is outside tier ${tier ?? '(unmapped)'} for work kind ${workKind}`});
+    }
     if (inTier.length) {
       eligible = inTier;
-      for (const c of cands.filter(c => !inTier.includes(c))) rejected.push({candidate: `${c.engine}/${c.model}`, reason: `outside tier ${tier} for work kind ${workKind}`});
+      rejected.push(...tierExclusions);
     } else {
       fallback = true;
       fallbackReason = `No eligible owner-authorized catalog candidates for tier ${tier ?? '(unmapped)'} and work kind ${workKind}; using previous ranking within authorized supply`;
@@ -362,7 +368,7 @@ function route(profile, opts = {}) {
     profile: {complexity: cx, budget, needs, attempt: profile.attempt || 1},
     choice: pool[0] || null,
     coldStart,
-    workKind: workKind ?? null, tier, fallback, fallbackReason,
+    workKind: workKind ?? null, tier, fallback, fallbackReason, tierExclusions,
     needsUserChoice: openCodeConsidered && oc.needsUserChoice,
     opencodePreference: openCodeConsidered ? oc : null,
     authorization: {source: [P.config, P.bots], rule: 'current configured model selections only'},

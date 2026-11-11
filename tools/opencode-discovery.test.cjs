@@ -30,7 +30,7 @@ test('route excludes OpenCode until preference; chosen discovered identity still
   fs.writeFileSync(R.P.config,JSON.stringify({instances:{account:{driverKind:'opencodeGo'}}}));
   fs.writeFileSync(R.P.bots,JSON.stringify([{modelSelection:{instanceId:'account',model:'synthetic/works'}}]));
   const snapshot={engines:[{id:'account',driver:'opencodeGo',defaultModel:'synthetic/works',models:[{id:'synthetic/works',inCatalog:true}]}]};
-  const policy={workKindTiers:{implement:'worker'}};
+  const policy={workKindTiers:{implement:'worker'},models:{'account/synthetic/works':{tier:'worker'}}};
   fs.writeFileSync(R.P.policy,JSON.stringify(policy));
   let r=R.route({complexity:'low',workKind:'implement'},{snapshot});
   assert.equal(r.choice,null);assert.equal(r.needsUserChoice,true);
@@ -46,4 +46,20 @@ test('preference CLI records current offered options and rejects failed candidat
   assert.equal(command('synthetic/fails').status,2);
   const r=command('synthetic/works');assert.equal(r.status,0,r.stderr);
   assert.deepEqual(JSON.parse(r.stdout).offered,['synthetic/works']);
+});
+
+for (const declaredTier of ['premium', null]) test(`OpenCode choice never assigns worker tier when policy tier is ${declaredTier}`, () => {
+  fs.writeFileSync(R.P.bots,JSON.stringify([{modelSelection:{instanceId:'account',model:'synthetic/works'}}]));
+  const policy={workKindTiers:{implement:'worker'},opencodePreference:{chosen:['synthetic/works'],offered:['synthetic/works'],askedAt:new Date().toISOString()},
+    ...(declaredTier ? {models:{'account/synthetic/works':{tier:declaredTier}}} : {})};
+  fs.writeFileSync(R.P.policy,JSON.stringify(policy));
+  const snapshot={engines:[{id:'account',driver:'opencodeGo',defaultModel:'synthetic/works',models:[{id:'synthetic/works',inCatalog:true}]}]};
+  const r=R.route({complexity:'low',workKind:'implement'},{snapshot});
+  assert.equal(r.choice.model,'synthetic/works','legacy fallback may still select the authorized choice');
+  assert.equal(r.needsUserChoice,false); assert.equal(r.fallback,true);
+  assert.match(r.fallbackReason,/tier worker.*work kind implement/);
+  assert.equal(r.tierExclusions[0].policyTier,declaredTier);
+  assert.match(r.tierExclusions[0].reason,declaredTier ? /policy tier premium is outside tier worker/ : /no policy tier declared/);
+  const saved=JSON.parse(fs.readFileSync(r.file,'utf8'));
+  assert.equal(saved.planned.fallback,true); assert.deepEqual(saved.tierExclusions,r.tierExclusions);
 });
