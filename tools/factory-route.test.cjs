@@ -7,15 +7,32 @@ const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hh-')), state = fs.mkdtempSy
 process.env.FACTORY_HATTERA_HOME = home; process.env.FACTORY_STATE_DIR = state;
 fs.mkdirSync(path.join(home, 'providers/engine-models'), {recursive: true}); fs.mkdirSync(path.join(home, 'usage'));
 fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({instances: {alpha: {driverKind: 'a'}, beta: {driverKind: 'b'}}}));
+// Authorization is explicit configuration, independent of catalogs/policy/usage.
+fs.writeFileSync(path.join(home, 'bots.json'), JSON.stringify([
+  ['alpha', 'a-pro'], ['beta', 'b-zen-free'], ['beta', 'b-other'],
+  ['opaque-account', 'opaque-route'], ['provider-91', 'opaque-model-0'], ['another-account-82', 'opaque-model-1'],
+].map(([instanceId, model]) => ({modelSelection: {instanceId, model}}))));
 fs.writeFileSync(path.join(home, 'providers/engine-models/alpha.json'), JSON.stringify({default: 'a-pro', options: [{id: 'a-pro', label: 'A Pro'}, {id: 'a-mini', label: 'A Mini'}]}));
-fs.writeFileSync(path.join(home, 'providers/engine-models/beta.json'), JSON.stringify({default: 'b-zen-free', options: [{id: 'b-zen-free', label: 'Zen Free', contextWindow: 32000}, {id: 'b-other', label: 'Other'}]}));
+fs.writeFileSync(path.join(home, 'providers/engine-models/beta.json'), JSON.stringify({default: 'b-zen-free', options: [{id: 'b-zen-free', label: 'Zen Free', priceReported: 'free', contextWindow: 32000}, {id: 'b-other', label: 'Other'}]}));
 const at = new Date().toISOString();
 fs.writeFileSync(path.join(home, 'usage/2026-11.jsonl'), [
   {instanceId: 'alpha', model: 'a-pro', input: 10, output: 5, at},
   {instanceId: 'beta', model: 'b-gone-free', input: 1, output: 1, at},
 ].map(x => JSON.stringify(x)).join('\n'));
 const R = require('./factory-route.cjs');
+const opaqueSnapshot = {observedAt: at, engines: [{id: 'opaque-account', defaultModel: 'opaque-route',
+  models: [{id: 'opaque-route', inCatalog: true, priceReported: 'unknown'}]}]};
 const outcome = (e, m, c, r) => fs.appendFileSync(R.P.outcomes, JSON.stringify({engine: e, model: m, complexity: c, result: r}) + '\n');
+
+test('a free-sounding identifier never supplies price evidence', () => {
+  const catalog = path.join(home, 'providers/engine-models/alpha.json');
+  const original = fs.readFileSync(catalog, 'utf8');
+  try {
+    fs.writeFileSync(catalog, JSON.stringify({default: 'free-promo', options: [{id: 'free-promo', label: 'Free forever'}]}));
+    const model = R.supply().engines.find(e => e.id === 'alpha').models.find(m => m.id === 'free-promo');
+    assert.equal(model.priceReported, 'unknown');
+  } finally { fs.writeFileSync(catalog, original); }
+});
 
 test('classify recognises limit, too-big, transient and broken signals', () => {
   assert.equal(R.classify("You've hit your usage limit. Try again at 5pm").class, 'limit');
@@ -75,6 +92,30 @@ test('cold start for high complexity prefers routes that actually ran; image nee
   fs.unlinkSync(R.P.policy);
 });
 
+test('balanced trades measured reliability, cost and latency while free-first keeps price priority', () => {
+  fs.writeFileSync(R.P.limits, '');
+  fs.writeFileSync(R.P.outcomes, '');
+  for (let i = 0; i < 10; i++) {
+    for (const [engine, model, result, costUsd, durationMs] of [
+      ['alpha', 'a-pro', 'ok', 0.001, 1000],
+      ['beta', 'b-zen-free', i < 7 ? 'ok' : 'broken', 0, 600000],
+    ]) fs.appendFileSync(R.P.outcomes, JSON.stringify({engine, model, complexity: 'high', result, costUsd, durationMs}) + '\n');
+  }
+  const free = R.route({complexity: 'high', budget: 'free-first'});
+  const balanced = R.route({complexity: 'high', budget: 'balanced'});
+  assert.equal(free.choice.engine, 'beta');
+  assert.equal(balanced.choice.engine, 'alpha');
+  assert.equal(balanced.choice.measurements.costSamples, 10);
+  assert.equal(balanced.choice.measurements.durationMsPerAttempt, 1000);
+  assert.equal(balanced.scoring.unknownPenalty, 1);
+  assert.ok(balanced.choice.score.every(Number.isFinite));
+  fs.writeFileSync(R.P.outcomes, '');
+  const unknown = R.route({complexity: 'low', budget: 'balanced'});
+  assert.equal(unknown.choice.measurements.costUsdPerAttempt, null);
+  assert.equal(unknown.choice.measurements.durationMsPerAttempt, null);
+  assert.ok(unknown.choice.flags.includes('observed cost unknown'));
+});
+
 test('limit on one model blocks the whole engine by default and keeps the reset hint', () => {
   fs.writeFileSync(R.P.limits, '');
   const e = R.recordLimit('alpha', 'a-pro', "Error: You've hit your usage limit. Try again at 3:15 PM.", null);
@@ -86,4 +127,206 @@ test('limit on one model blocks the whole engine by default and keeps the reset 
   R.recordLimit('alpha', 'a-pro', 'per-model limit', null, 'model');
   assert.ok(R.activeLimits().has('alpha/a-pro') && !R.activeLimits().has('alpha'));
   fs.writeFileSync(R.P.limits, '');
+});
+
+test('arbitrary identities use configured weights and thresholds; absent observations stay null', () => {
+  fs.writeFileSync(R.P.limits, '');
+  fs.writeFileSync(R.P.outcomes, '');
+  const snapshot = {observedAt: at, engines: ['provider-91', 'another-account-82'].map((id, i) => ({
+    id, defaultModel: `opaque-model-${i}`, models: [{id: `opaque-model-${i}`, inCatalog: true, priceReported: 'unknown'}],
+  }))};
+  try {
+    const missing = R.route({complexity: 'low', budget: 'balanced'}, {snapshot});
+    assert.equal(missing.choice.capability.ok, null);
+    assert.equal(missing.choice.cost, 'unknown');
+    assert.equal(missing.choice.measurements.successRate, null);
+    assert.equal(missing.choice.measurements.costUsdPerAttempt, null);
+    assert.equal(missing.choice.measurements.durationMsPerAttempt, null);
+    for (const [i, costUsd, durationMs] of [[0, 0.02, 10], [1, 0.001, 10000]]) {
+      fs.appendFileSync(R.P.outcomes, JSON.stringify({engine: snapshot.engines[i].id, model: `opaque-model-${i}`,
+        complexity: 'high', result: 'ok', costUsd, durationMs}) + '\n');
+    }
+    fs.writeFileSync(R.P.policy, JSON.stringify({capability: {minOutcomes: 1, minSuccessRate: 1},
+      balanced: {weights: {failureRate: 0, cost: 1, latency: 0}, costScaleUsd: 0.5}}));
+    const cheap = R.route({complexity: 'high', budget: 'balanced'}, {snapshot});
+    assert.equal(cheap.choice.engine, 'another-account-82');
+    assert.equal(cheap.choice.capability.ok, true);
+    assert.equal(cheap.scoring.costScaleUsd, 0.5);
+    fs.writeFileSync(R.P.policy, JSON.stringify({balanced: {weights: {failureRate: 0, cost: 0, latency: 1}}}));
+    const fast = R.route({complexity: 'low', budget: 'balanced'}, {snapshot});
+    assert.equal(fast.choice.engine, 'provider-91');
+    fs.writeFileSync(R.P.policy, JSON.stringify({balanced: {costScaleUsd: 0}}));
+    assert.throws(() => R.route({budget: 'balanced'}, {snapshot}), /invalid routing policy/);
+  } finally {
+    fs.unlinkSync(R.P.policy);
+    fs.writeFileSync(R.P.outcomes, '');
+  }
+});
+
+test('only a missing policy defaults; invalid or unreadable policy fails before receipts', () => {
+  const receipts = () => fs.existsSync(R.P.receipts) ? fs.readdirSync(R.P.receipts).sort() : [];
+  try {
+    fs.rmSync(R.P.policy, {force: true});
+    assert.ok(R.route({complexity: 'low'}, {snapshot: opaqueSnapshot}).choice);
+    const before = receipts();
+    for (const text of ['{bad json', 'null', '[]', '"not an object"']) {
+      fs.writeFileSync(R.P.policy, text);
+      assert.throws(() => R.route({budget: 'balanced'}, {snapshot: opaqueSnapshot}), /Invalid routing policy/);
+      assert.deepEqual(receipts(), before);
+    }
+    fs.unlinkSync(R.P.policy);
+    for (const policy of [{balanced: 42}, {balanced: {weights: null}}, {capability: []}]) {
+      fs.writeFileSync(R.P.policy, JSON.stringify(policy));
+      assert.throws(() => R.route({}, {snapshot: opaqueSnapshot}), /invalid routing policy/);
+      assert.deepEqual(receipts(), before);
+    }
+    fs.unlinkSync(R.P.policy);
+    // A directory at the policy path produces a real read failure on Windows
+    // and POSIX, without relying on platform-specific chmod behavior.
+    fs.mkdirSync(R.P.policy);
+    assert.throws(() => R.route({}, {snapshot: opaqueSnapshot}), /Cannot read routing policy/);
+    assert.deepEqual(receipts(), before);
+    fs.rmdirSync(R.P.policy);
+    fs.writeFileSync(R.P.policy, '{}');
+    assert.ok(R.route({complexity: 'low'}, {snapshot: opaqueSnapshot}).choice);
+  } finally {
+    if (fs.existsSync(R.P.policy) && fs.statSync(R.P.policy).isDirectory()) fs.rmdirSync(R.P.policy);
+    else fs.rmSync(R.P.policy, {force: true});
+  }
+});
+
+test('finite extreme observations retain finite measured means and persisted scores', () => {
+  fs.writeFileSync(R.P.limits, '');
+  try {
+    for (const value of [1e308, Number.MAX_VALUE, Number.MIN_VALUE, 0]) {
+      fs.writeFileSync(R.P.outcomes, [1, 2].map(() => JSON.stringify({engine: 'opaque-account', model: 'opaque-route',
+        complexity: 'low', result: 'ok', costUsd: value, durationMs: value})).join('\n'));
+      const r = R.route({complexity: 'low', budget: 'balanced'}, {snapshot: opaqueSnapshot});
+      const saved = JSON.parse(fs.readFileSync(r.file, 'utf8')).choice;
+      assert.equal(saved.measurements.costUsdPerAttempt, value);
+      assert.equal(saved.measurements.durationMsPerAttempt, value);
+      assert.equal(saved.measurements.costSamples, 2);
+      assert.ok(saved.score.every(Number.isFinite));
+      assert.ok(!saved.flags.includes('observed cost unknown'));
+    }
+    fs.writeFileSync(R.P.outcomes, [0, Number.MIN_VALUE].map(value => JSON.stringify({engine: 'opaque-account', model: 'opaque-route',
+      complexity: 'low', result: 'ok', costUsd: value, durationMs: value})).join('\n'));
+    const tiny = R.route({complexity: 'low', budget: 'balanced'}, {snapshot: opaqueSnapshot});
+    assert.ok(tiny.choice.measurements.costUsdPerAttempt > 0);
+    assert.ok(tiny.choice.measurements.durationMsPerAttempt > 0);
+    // Large valid policy scales must not overflow value+scale; large weights
+    // must not overflow their sum or their products with unknown penalties.
+    fs.writeFileSync(R.P.policy, JSON.stringify({balanced: {costScaleUsd: Number.MAX_VALUE,
+      latencyScaleMs: Number.MAX_VALUE, weights: {failureRate: 0, cost: 1e308, latency: 1e308}, unknownPenalty: 1e308}}));
+    fs.writeFileSync(R.P.outcomes, JSON.stringify({engine: 'opaque-account', model: 'opaque-route',
+      complexity: 'low', result: 'ok', costUsd: Number.MAX_VALUE, durationMs: Number.MAX_VALUE}));
+    const measured = R.route({complexity: 'low', budget: 'balanced'}, {snapshot: opaqueSnapshot});
+    assert.equal(measured.choice.score[4], 0.5);
+    fs.writeFileSync(R.P.outcomes, '');
+    const unknown = R.route({complexity: 'low', budget: 'balanced'}, {snapshot: opaqueSnapshot});
+    assert.equal(unknown.choice.measurements.costUsdPerAttempt, null);
+    assert.ok(unknown.choice.score.every(Number.isFinite));
+    assert.equal(unknown.choice.score[4], 1e308);
+  } finally {
+    fs.writeFileSync(R.P.outcomes, '');
+    fs.rmSync(R.P.policy, {force: true});
+  }
+});
+
+const tierPolicy = () => ({workKindTiers: {implement: 'worker', review: 'premium'}, models: {
+  'alpha/a-pro': {tier: 'premium'}, 'beta/b-zen-free': {tier: 'worker'},
+  'beta/b-other': {tier: 'worker', costClass: 'subscription'}, 'alpha/a-mini': {tier: 'worker', costClass: 'free'},
+}});
+test('work-kind intersection ranks only authorized catalog models within the requested tier', () => {
+  fs.writeFileSync(R.P.limits, ''); fs.writeFileSync(R.P.outcomes, '');
+  fs.writeFileSync(R.P.policy, JSON.stringify(tierPolicy()));
+  try {
+    const worker = R.route({complexity: 'low', workKind: 'implement'});
+    assert.equal(worker.choice.model, 'b-zen-free');
+    assert.equal(worker.fallback, false);
+    assert.equal(worker.tier, 'worker');
+    assert.ok(worker.fallbacks.some(c => c.model === 'b-other'), 'more expensive worker remains a fallback within tier');
+    assert.ok(worker.rejected.some(r => r.candidate === 'alpha/a-mini' && /not owner-authorized/.test(r.reason)));
+    const review = R.route({complexity: 'low', workKind: 'review'});
+    assert.equal(review.choice.model, 'a-pro');
+    assert.equal(review.fallback, false);
+    const legacy = R.route({complexity: 'low'});
+    assert.equal(legacy.choice.model, 'b-zen-free', 'no work kind retains existing ranking for authorized supply');
+    assert.equal(legacy.workKind, null);
+    assert.equal(legacy.fallback, false);
+  } finally { fs.rmSync(R.P.policy, {force: true}); }
+});
+
+test('empty authorized tier falls back with persisted tier/work-kind reason, never policy authorization', () => {
+  fs.writeFileSync(R.P.policy, JSON.stringify({workKindTiers: {implement: 'worker'}, models: {
+    'alpha/a-pro': {tier: 'premium'}, 'alpha/a-mini': {tier: 'worker', costClass: 'free'},
+  }}));
+  try {
+    const r = R.route({complexity: 'low', workKind: 'implement'});
+    assert.equal(r.choice.model, 'b-zen-free');
+    assert.equal(r.fallback, true);
+    assert.match(r.fallbackReason, /tier worker.*work kind implement/);
+    assert.match(r.reason, /tier worker.*work kind implement/);
+    assert.equal(JSON.parse(fs.readFileSync(r.file, 'utf8')).fallback, true);
+    assert.ok(!r.fallbacks.some(c => c.model === 'a-mini'));
+  } finally { fs.rmSync(R.P.policy, {force: true}); }
+});
+
+test('authorization is current configured state, not policy, catalog default or prior execution', () => {
+  const bots = fs.readFileSync(R.P.bots, 'utf8');
+  fs.writeFileSync(R.P.policy, JSON.stringify(tierPolicy()));
+  try {
+    fs.writeFileSync(R.P.bots, '[]');
+    for (const workKind of [undefined, 'implement']) {
+      const denied = R.route({complexity: 'low', ...(workKind ? {workKind} : {})});
+      assert.equal(denied.choice, null);
+      assert.ok(denied.rejected.some(r => r.candidate === 'alpha/a-pro' && /not owner-authorized/.test(r.reason)));
+    }
+    fs.writeFileSync(R.P.bots, bots);
+    assert.equal(R.route({complexity: 'low', workKind: 'implement'}).choice.model, 'b-zen-free');
+  } finally { fs.writeFileSync(R.P.bots, bots); fs.rmSync(R.P.policy, {force: true}); }
+});
+
+test('CLI --work-kind overrides the profile and records the resolved tier', () => {
+  const {spawnSync} = require('node:child_process');
+  const profile = path.join(state, 'cli-profile.json');
+  fs.writeFileSync(profile, JSON.stringify({complexity: 'low', workKind: 'implement'}));
+  fs.writeFileSync(R.P.policy, JSON.stringify(tierPolicy()));
+  try {
+    const result = spawnSync(process.execPath, [path.join(__dirname, 'factory-route.cjs'), 'route', profile,
+      '--work-kind', 'review', '--json'], {encoding: 'utf8', env: process.env});
+    assert.equal(result.status, 0, result.stderr);
+    const receipt = JSON.parse(result.stdout);
+    assert.equal(receipt.choice.model, 'a-pro');
+    assert.equal(receipt.workKind, 'review');
+    assert.equal(receipt.tier, 'premium');
+  } finally { fs.rmSync(R.P.policy, {force: true}); }
+});
+
+test('workspace, new-bot and conversation configured selections each grant only their exact identity', () => {
+  const cfg = fs.readFileSync(R.P.config, 'utf8'), bots = fs.readFileSync(R.P.bots, 'utf8');
+  const selection = {instanceId: 'alpha', model: 'a-pro'};
+  try {
+    for (const source of ['workspace', 'new-bot', 'conversation']) {
+      const config = JSON.parse(cfg);
+      if (source === 'workspace') config.defaultModelSelection = selection;
+      if (source === 'new-bot') config.newBotDefaults = {profile: {modelSelection: selection}};
+      fs.writeFileSync(R.P.config, JSON.stringify(config));
+      fs.writeFileSync(R.P.bots, JSON.stringify(source === 'conversation' ? [{tasks: [{modelSelection: selection}]}] : []));
+      const r = R.route({complexity: 'low'});
+      assert.equal(r.choice.model, 'a-pro', source);
+      assert.equal(r.fallbacks.length, 0, 'other catalog choices remain unauthorized');
+    }
+  } finally { fs.writeFileSync(R.P.config, cfg); fs.writeFileSync(R.P.bots, bots); }
+});
+
+test('invalid tier policy fails explicitly before writing a route receipt', () => {
+  const count = fs.readdirSync(R.P.receipts).length;
+  try {
+    for (const policy of [{workKindTiers: []}, {workKindTiers: {implement: ''}}, {models: {'alpha/a-pro': {tier: 2}}}]) {
+      fs.writeFileSync(R.P.policy, JSON.stringify(policy));
+      assert.throws(() => R.route({complexity: 'low', workKind: 'implement'}), /invalid routing policy/);
+      assert.equal(fs.readdirSync(R.P.receipts).length, count);
+    }
+  } finally { fs.rmSync(R.P.policy, {force: true}); }
 });

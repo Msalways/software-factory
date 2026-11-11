@@ -2,6 +2,13 @@
 
 Factory releases. `node tools/factory-sync.cjs plan <project>` lists the entries newer than the version a project last synced.
 
+## 1.3.0 (2026-11-12)
+- Policy-only work-kind tiers intersect owner-authorized catalog supply, with explicit empty-tier fallback and configurable observed scoring.
+- Dated OpenCode discovery, explicit free-only response probes and user preference gate.
+- Ask initially and when chosen models retire or new options appear; never auto-select.
+- Role renders describe the choice protocol; no live bot settings applied.
+- Per-slice receipts separate planned and reported execution, nullable usage, handoff/mentor counters, classified escalation and terminal outcomes. Automatic provider/usage correlation remains unwired.
+
 ## 1.2.0 (2026-11-11)
 - Mentor/worker slice briefs, bounded mentor questions and evidence-based escalation.
 - Owner-editable work-kind tier policy example; no fixed model identities.
