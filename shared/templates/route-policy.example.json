@@ -12,5 +12,6 @@
   },
   "_modelTierSchema": "models[engine/model].tier is an owner-declared tier; no model identities are preassigned. A worker pilot requires owner authorization first.",
   "openCodeWorkerModels": [],
+  "opencodePreference": {"chosen": [], "askedAt": null, "offered": []},
   "_openCodeWorkerModels": "Leave empty until initial owner preference selection (slice 02b). Neither this list nor a tier declaration authorizes a model."
 }

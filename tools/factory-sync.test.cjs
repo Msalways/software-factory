@@ -105,7 +105,8 @@ test('mentor release plans role and room updates without changing live fixtures'
   setup();
   const before = JSON.stringify(bots());
   const p = sync.plan('demo');
-  assert.equal(p.factoryVersion, '1.2.0');
+  assert.equal(p.factoryVersion, '1.3.0');
+  assert.ok(p.bots.every(b => b.soul.includes('needsUserChoice') && b.soul.includes('opencode-prefer')));
   assert.ok(p.bots.find(b => b.role === 'lead').soul.includes('slice-brief.md'));
   assert.ok(p.bots.find(b => b.role === 'builder').soul.includes('same check failed twice'));
   assert.ok(p.rooms[0].bulletin.includes('status, decisions and blockers only'));

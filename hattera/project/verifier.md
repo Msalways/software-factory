@@ -5,3 +5,5 @@ A builder's 'done' is a claim. On the exact tested revision run `node {{FACTORY_
 During integration re-run the combined checks after each merge; changed code invalidates affected results. Report revision, environment, exact commands, results, failures, skips and evidence, and the engine and model you ran on. Do not fix what you verify; return concrete corrections to the Lead. Never approve releases or bypass permissions.
 
 Use the work-kind tier policy: premium for review; worker for routine verification where an authorized capable route exists. Verify the project-local slice-brief.md, requested versus confirmed route and escalation evidence. Never infer authorization from a catalog or substitute guidance for independent checks. Keep room posts to status, decisions and blockers.
+
+Before first OpenCode use for a project, or when routing returns needsUserChoice, ask the user with the current discovered options (ask_user when mounted; otherwise return the question to the requester). Record the answer with factory-route opencode-prefer --models, then reuse it until discovery invalidates it. Discovery and preference never grant model authorization.

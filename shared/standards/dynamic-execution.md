@@ -77,6 +77,31 @@ Classify the failure using gates-and-handoffs.md, then:
 OpenCode command: `opencode.cmd` in the user's npm global folder. Its run help confirms per-run `--model provider/model#variant`, `--file`, `--format json` and session options. The PowerShell .ps1 launcher was blocked by execution policy, and the .cmd launcher worked. In the sandbox, the CLI needed approved access to write its log outside the task workspace. Hattera setup controls exposed only Codex at that time, which was a catalog limit (above), not proof that OpenCode was unconfigured.
 
 ## Mentor and worker routing
+
+### OpenCode discovery and initial preference
+Run `node tools/factory-route.cjs opencode-discover` before offering OpenCode.
+It writes dated `opencode-discovery.json` under the routing state directory.
+Only explicit free cost metadata permits a tiny response probe; unknown/paid
+models are recorded as skipped. Process exit alone is not a confirmed response.
+Each explicitly free candidate gets a probe with a 10-second timeout. No ranking or
+choice is performed. Empty output is an unverified discovery, never availability.
+`FACTORY_OPENCODE_BIN` selects an installed CLI; JSON arrays in
+`FACTORY_OPENCODE_MODELS_ARGS` and `FACTORY_OPENCODE_RUN_ARGS` accommodate its
+documented flags (for example verbose metadata or disabling external plugins).
+Defaults use the active CLI's `models --standalone` and `run` commands.
+
+Before first OpenCode use for a project, or when `needsUserChoice` is true, ask
+the user with the discovered, free, responding options. Use ask_user if mounted;
+otherwise return the question to the requester. Record the answer with
+`node tools/factory-route.cjs opencode-prefer --models <id,id>` using the project's
+routing state directory. The policy stores chosen, askedAt and offered. This is
+preference, never authorization. Reuse it without asking on every dispatch.
+Missing preference, a retired choice, newly responding options, failed discovery
+or discovery older than one day excludes OpenCode and reports the choice needed.
+Only chosen, confirmed, catalog-listed and owner-authorized identities can route.
+Chosen identities join the implementation tier declared by workKindTiers.
+No bots or owner configuration are changed by these commands.
+
 Work kind and model tiers are owner-editable policy data in route-policy.example.json.
 Orchestration, planning, review and explanation request premium; implementation and
 routine verification request worker. These are policy defaults, not model assignments.

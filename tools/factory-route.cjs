@@ -17,6 +17,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const defaults = require('./route-defaults.json');
+const opencode = require('./opencode-discovery.cjs');
 
 const HOME = process.env.FACTORY_HATTERA_HOME || path.join(os.homedir(), '.openmausbot');
 const STATE = process.env.FACTORY_STATE_DIR || path.join(__dirname, '..', 'state', 'routing');
@@ -29,6 +30,7 @@ const P = {
   limits: path.join(STATE, 'limit-events.jsonl'),
   outcomes: path.join(STATE, 'outcomes.jsonl'),
   policy: path.join(STATE, 'route-policy.json'),
+  discovery: path.join(STATE, 'opencode-discovery.json'),
   receipts: path.join(STATE, 'receipts'),
       };
 const LEVELS = ['low', 'medium', 'high'];
@@ -232,6 +234,8 @@ function route(profile, opts = {}) {
   const workKind = opts.workKind ?? profile.workKind;
   if (workKind !== undefined && (typeof workKind !== 'string' || !workKind.trim())) throw Error('workKind must be a nonempty string');
   const tier = workKind ? policy.workKindTiers?.[workKind] ?? null : null;
+  const oc = opencode.preference(readJson(P.discovery, null), policy);
+  let openCodeConsidered = false;
   const limits = activeLimits();
   const proven = capability(policy);
   // Observations are per completed attempt, not catalog claims or authorization.
@@ -252,15 +256,18 @@ function route(profile, opts = {}) {
   const avoid = new Set(opts.avoid || []);
   const rejected = [], cands = [];
   for (const e of snap.engines) {
+    const isOpenCode = e.driver === 'opencodeGo';
+    if (isOpenCode) openCodeConsidered = true;
     const epol = policy.engines?.[e.id] || {};
     if (epol.disabled) continue;
-    const pool = e.models.filter(m => m.usage || policy.models?.[`${e.id}/${m.id}`] || m.id === e.defaultModel || (m.priceReported === 'free' && epol.trialFree !== false));
+    const pool = e.models.filter(m => (isOpenCode && oc.chosen.includes(m.id)) || m.usage || policy.models?.[`${e.id}/${m.id}`] || m.id === e.defaultModel || (m.priceReported === 'free' && epol.trialFree !== false));
     for (const m of pool) {
       const key = `${e.id}/${m.id}`;
       const rej = r => rejected.push({candidate: key, reason: r});
       if (policy.models?.[key]?.disabled) { rej('disabled in policy'); continue; }
       if (!m.inCatalog) { rej(m.withdrawnFromCatalog ? 'no longer in engine catalog' : 'no catalog for engine'); continue; }
       if (!authorized.has(key)) { rej('not owner-authorized in current configured model selections'); continue; }
+      if (isOpenCode && (oc.needsUserChoice || !oc.chosen.includes(m.id))) { rej(oc.reason || 'not chosen in OpenCode preference'); continue; }
       if (exclude.has(key) || exclude.has(e.id)) { rej('excluded (failed or in use for this slice)'); continue; }
       if (opts.notEngine && e.id === opts.notEngine) { rej('same engine as builder (verifier must differ)'); continue; }
       const lim = limits.get(key) || limits.get(e.id);
@@ -294,7 +301,8 @@ function route(profile, opts = {}) {
   }
   let eligible = cands, fallback = false, fallbackReason = null;
   if (workKind) {
-    const inTier = tier ? cands.filter(c => policy.models?.[`${c.engine}/${c.model}`]?.tier === tier) : [];
+    const inTier = tier ? cands.filter(c => policy.models?.[`${c.engine}/${c.model}`]?.tier === tier ||
+      (tier === policy.workKindTiers?.implement && snap.engines.some(e => e.id === c.engine && e.driver === 'opencodeGo') && oc.chosen.includes(c.model))) : [];
     if (inTier.length) {
       eligible = inTier;
       for (const c of cands.filter(c => !inTier.includes(c))) rejected.push({candidate: `${c.engine}/${c.model}`, reason: `outside tier ${tier} for work kind ${workKind}`});
@@ -354,6 +362,8 @@ function route(profile, opts = {}) {
     choice: pool[0] || null,
     coldStart,
     workKind: workKind ?? null, tier, fallback, fallbackReason,
+    needsUserChoice: openCodeConsidered && oc.needsUserChoice,
+    opencodePreference: openCodeConsidered ? oc : null,
     authorization: {source: [P.config, P.bots], rule: 'current configured model selections only'},
     scoring: {policy: budget, ...(budget === 'balanced' ? policy.balanced : {}), capability: policy.capability, costRank: policy.costRank,
       defaultsSource: 'tools/route-defaults.json', overridesSource: P.policy},
@@ -364,6 +374,7 @@ function route(profile, opts = {}) {
     effortApplied: 'unknown until the engine confirms; record it in evidence.json',
   };
   if (fallbackReason) receipt.reason += `; ${fallbackReason}`;
+  if (receipt.needsUserChoice) { receipt.fallback = true; receipt.fallbackReason ||= oc.reason; receipt.reason += `; ${oc.reason}; OpenCode excluded`; }
   fs.mkdirSync(P.receipts, {recursive: true});
   const f = path.join(P.receipts, `${(profile.slice || 'adhoc').replace(/[^\w.-]/g, '_')}-${Date.now()}.json`);
   fs.writeFileSync(f, JSON.stringify(receipt, null, 2)); receipt.file = f;
@@ -379,7 +390,18 @@ if (require.main === module) {
   const json = has('--json');
   const cmd = a.shift();
   try {
-    if (cmd === 'supply') {
+    if (cmd === 'opencode-discover') {
+      fs.mkdirSync(STATE, {recursive: true});
+      console.log(JSON.stringify(opencode.discover(P.discovery), null, 2));
+    } else if (cmd === 'opencode-prefer') {
+      const chosen = (flag('--models') || '').split(',').filter(Boolean);
+      const raw = readPolicy(), discovery = readJson(P.discovery, null);
+      const state = opencode.preference(discovery, {});
+      if (!chosen.length || chosen.some(id => !state.options.includes(id)) || !discovery || Date.now() - Date.parse(discovery.observedAt) > 86400000 || discovery.listingStatus !== 0) throw Error('choose only models from a successful fresh discovery');
+      raw.opencodePreference = {chosen: [...new Set(chosen)], askedAt: new Date().toISOString(), offered: state.options};
+      fs.mkdirSync(STATE, {recursive: true}); fs.writeFileSync(P.policy, JSON.stringify(raw, null, 2));
+      console.log(JSON.stringify(raw.opencodePreference));
+    } else if (cmd === 'supply') {
       const s = supply();
       if (json) console.log(JSON.stringify(s, null, 2));
       else for (const e of s.engines) {

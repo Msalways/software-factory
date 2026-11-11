@@ -2,6 +2,11 @@
 
 Factory releases. `node tools/factory-sync.cjs plan <project>` lists the entries newer than the version a project last synced.
 
+## 1.3.0 (2026-11-11)
+- Dated OpenCode discovery, explicit free-only response probes and user preference gate.
+- Ask initially and when chosen models retire or new options appear; never auto-select.
+- Role renders describe the choice protocol; no live bot settings applied.
+
 ## 1.2.0 (2026-11-11)
 - Mentor/worker slice briefs, bounded mentor questions and evidence-based escalation.
 - Owner-editable work-kind tier policy example; no fixed model identities.
