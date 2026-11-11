@@ -61,7 +61,7 @@ function render(role, vars) {
 function roomBlock(vars) {
   return `Software Factory ${vars.VERSION}: this room follows ${vars.FACTORY_ROOT.replace(/\\/g, '/')}/shared/standards/gates-and-handoffs.md ` +
     '(default-fail gates, done-contract and evidence.json per slice, independent verification, merge queue, worktree cleanup after merge). ' +
-    'The project Lead owns slicing, routing and integration. Project-specific scope and authorizations follow below.';
+    'The project Lead owns slicing, routing and integration. Rooms carry status, decisions and blockers only; detailed work and mentor questions stay in the owning threads. Project-specific scope and authorizations follow below.';
 }
 function changes(fromVersion) {
   const f = path.join(REPO, 'CHANGELOG.md'); if (!fs.existsSync(f)) return [];

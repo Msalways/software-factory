@@ -47,3 +47,19 @@ Classify the failure using gates-and-handoffs.md, then:
 
 ## Observed status (2026-11-04, historical; re-verify before relying on it)
 OpenCode command: `opencode.cmd` in the user's npm global folder. Its run help confirms per-run `--model provider/model#variant`, `--file`, `--format json` and session options. The PowerShell .ps1 launcher was blocked by execution policy, and the .cmd launcher worked. In the sandbox, the CLI needed approved access to write its log outside the task workspace. Hattera setup controls exposed only Codex at that time, which was a catalog limit (above), not proof that OpenCode was unconfigured.
+
+## Mentor and worker routing
+Work kind and model tiers are owner-editable policy data in route-policy.example.json.
+Orchestration, planning, review and explanation request premium; implementation and
+routine verification request worker. These are policy defaults, not model assignments.
+Dispatch intersects the requested tier with live owner-authorized configured catalog
+choices. Unknown observations remain unknown. An empty tier falls back only within
+existing authorization, with the reason recorded; discovery never grants permission.
+
+Before dispatch the Lead writes shared/templates/slice-brief.md into the project.
+Workers own separate threads/worktrees and ask mentors for bounded guidance from
+those threads. Mentors do not take over implementation. Escalation to premium
+requires the same check failing twice or a proven incorrect brief, with evidence.
+Rooms carry status, decisions and blockers only. Link detailed explanations instead
+of replaying them in every room turn. Native per-turn usage originates in Hattera's
+usage ledger; a route request is not proof of accepted execution or reported usage.

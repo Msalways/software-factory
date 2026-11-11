@@ -100,3 +100,15 @@ test('notes the project adds after the block survive an update', () => {
   assert.ok(v.soul.includes('New project fact: staging is at demo-stg.'));
   assert.ok(v.soul.includes('You verify Demo.'));
 });
+
+test('mentor release plans role and room updates without changing live fixtures', () => {
+  setup();
+  const before = JSON.stringify(bots());
+  const p = sync.plan('demo');
+  assert.equal(p.factoryVersion, '1.2.0');
+  assert.ok(p.bots.find(b => b.role === 'lead').soul.includes('slice-brief.md'));
+  assert.ok(p.bots.find(b => b.role === 'builder').soul.includes('same check failed twice'));
+  assert.ok(p.rooms[0].bulletin.includes('status, decisions and blockers only'));
+  assert.equal(JSON.stringify(bots()), before, 'plan must not apply settings');
+  assert.ok(fs.readFileSync(path.join(__dirname,'../shared/templates/slice-brief.md'),'utf8').includes('Mentor-question protocol'));
+});

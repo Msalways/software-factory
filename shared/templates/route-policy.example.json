@@ -1,8 +1,14 @@
 {
-  "_about": "Editable routing policy (data, not code). Values here must come from what engines report or from the user; never guess. Capability is learned from 'factory-route outcome' records; use models.<engine/model>.maxComplexity only to override. costClass: free|subscription|metered (unset = unknown).",
-  "engines": {
-    "claude": { "effortLevels": ["low", "medium", "high", "xhigh", "max"], "_source": "Hattera team-setup catalog, observed 2026-11-10" },
-    "codex":  { "effortLevels": ["low", "medium", "high", "xhigh", "max"], "_source": "Hattera team-setup catalog, observed 2026-11-10" }
+  "_about": "Owner-edited routing data. Assign tiers only to authorized configured model identities observed in engine output; catalogs alone never authorize execution. Missing cost and capability observations stay unknown. Empty tiers require an explicit fallback receipt.",
+  "engines": {},
+  "models": {},
+  "workKindTiers": {
+    "orchestrate": "premium",
+    "plan": "premium",
+    "review": "premium",
+    "explain": "premium",
+    "implement": "worker",
+    "routine-verify": "worker"
   },
-  "models": {}
+  "_modelTierSchema": "models[engine/model].tier is an owner-declared tier; no model identities are preassigned. A worker pilot requires owner authorization first."
 }
