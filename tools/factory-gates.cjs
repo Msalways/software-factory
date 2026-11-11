@@ -9,6 +9,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const {spawnSync} = require('node:child_process');
+const {checkBriefFile} = require('./factory-brief.cjs');
 
 function git(cwd, args) {
   const r = spawnSync('git', args, {cwd, encoding: 'utf8'});
@@ -62,6 +63,13 @@ function check(worktree, evidencePath, opts = {}) {
   if (dirty.length) fail('artifacts_exist', `working tree not clean: ${dirty.slice(0, 10).join(', ')}`);
   if (ev && ev.treeClean === true && dirty.length) res.findings.push('claim mismatch: evidence says treeClean=true but tree is dirty');
   pass('artifacts_exist');
+
+  // Optional for legacy evidence; required when a new slice declares its brief.
+  if (ev && ev.brief) {
+    const brief = checkBriefFile(path.resolve(worktree,ev.brief));
+    if (brief.pass) pass('brief_complete');
+    else for (const finding of brief.findings) fail('brief_complete',finding);
+  }
 
   // ---- diff_matches_claims
   if (!ev) fail('diff_matches_claims', 'no evidence to compare');
@@ -119,6 +127,11 @@ function check(worktree, evidencePath, opts = {}) {
 
 if (require.main === module) {
   const a = process.argv.slice(2);
+  if (a[0] === 'brief') {
+    const result = checkBriefFile(a[1] || '');
+    console.log(JSON.stringify(result,null,2));
+    process.exit(result.pass ? 0 : 1);
+  }
   const flag = n => { const i = a.indexOf(n); if (i < 0) return undefined; const v = a[i + 1]; a.splice(i, 2); return v; };
   const has = n => { const i = a.indexOf(n); if (i < 0) return false; a.splice(i, 1); return true; };
   const base = flag('--base'), run = has('--run'), json = has('--json'), ui = has('--ui');
