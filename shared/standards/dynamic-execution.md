@@ -51,7 +51,7 @@ correlation remains unimplemented.
 
 ## 3a. Tools (`tools/` in the factory root, Node, no model calls)
 - `node tools/factory-route.cjs supply`: live snapshot of engines, catalogs (with staleness), models that ran here, and models withdrawn from a catalog.
-- `node tools/factory-route.cjs route <profile.json> [--not-engine <builder engine>] [--avoid <busy engines>] [--exclude engine/model,...]`: ranked choice, fallbacks and a routing receipt in `state/routing/receipts/`. Exit code 3 means there is no candidate, so mark the slice waiting-for-quota. The profile is `{"slice","complexity":"low|medium|high","budget":"free-first|balanced|best-quality","needs":{"imageInput","contextTokens"},"attempt"}`.
+- `node tools/factory-route.cjs route <profile.json> [--work-kind <kind>] [--not-engine <builder engine>] [--avoid <busy engines>] [--exclude engine/model,...]`: ranked choice, fallbacks and a routing receipt in `state/routing/receipts/`. Exit code 3 means there is no candidate, so mark the slice waiting-for-quota. The profile is `{"slice","complexity":"low|medium|high","budget":"free-first|balanced|best-quality","needs":{"imageInput","contextTokens"},"attempt","workKind"}`. The CLI work kind overrides the profile value.
 - `node tools/factory-route.cjs detect <engine> --model <m> <output-file|->`: classifies output text and records limit signals. These are engine-wide unless `--model-scoped`, and keep any reset time given.
 - `node tools/factory-route.cjs limit <engine> --signal "<text>" [--reset ISO]`: records a limit seen elsewhere, for example a Hattera incident.
 - `node tools/factory-route.cjs outcome <engine> <model> <complexity> <ok|transient|limit|broken|too-big|spec|repeated> --slice <id> --note "<evidence>"`: **record one after every verified slice.** Capability is learned from these records. A model counts as proven at a complexity after at least 2 relevant outcomes with at least 70% success. Unproven or free models are tried on low complexity, and a cold start is labelled in the receipt.
@@ -83,6 +83,28 @@ routine verification request worker. These are policy defaults, not model assign
 Dispatch intersects the requested tier with live owner-authorized configured catalog
 choices. Unknown observations remain unknown. An empty tier falls back only within
 existing authorization, with the reason recorded; discovery never grants permission.
+
+The router reads `<factory-worktree>/state/routing/route-policy.json`, or
+`<FACTORY_STATE_DIR>/route-policy.json` when that environment variable is set.
+Copy `shared/templates/route-policy.example.json` there and edit
+`workKindTiers` and `models["engine/model"].tier`. Tier names are arbitrary policy
+values. The user policy instance supplied with tier-02a assigns catalog-observed
+models to the user's premium and worker preferences without asserting price,
+readiness or capability. Its OpenCode worker list is empty pending the owner's
+initial choice. Refresh observed identities as catalogs change; never infer free
+status or select a newly discovered model on the owner's behalf.
+
+Every route intersects current catalog supply with configured selections from
+Hattera's `config.json` (workspace and new-bot defaults) and `bots.json` (bot and
+conversation selections), under `FACTORY_HATTERA_HOME` or `~/.openmausbot`.
+Catalog defaults, previous execution and policy entries do not grant authorization.
+For a work kind, rank that authorized intersection within its declared tier using
+the existing capability and budget rules. If the tier has no eligible candidate
+or the work kind is unmapped, use the existing authorized ranking and record
+`fallback: true` and `fallbackReason` naming the tier and work kind. Omitting the
+work kind preserves ranking across all authorized candidates. This permission
+check also applies to legacy calls; a previously discovered-only route is refused.
+The receipt records the work kind, tier and authorization source paths.
 
 Before dispatch the Lead writes shared/templates/slice-brief.md into the project.
 Workers own separate threads/worktrees and ask mentors for bounded guidance from

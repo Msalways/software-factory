@@ -10,5 +10,7 @@
     "implement": "worker",
     "routine-verify": "worker"
   },
-  "_modelTierSchema": "models[engine/model].tier is an owner-declared tier; no model identities are preassigned. A worker pilot requires owner authorization first."
+  "_modelTierSchema": "models[engine/model].tier is an owner-declared tier; no model identities are preassigned. A worker pilot requires owner authorization first.",
+  "openCodeWorkerModels": [],
+  "_openCodeWorkerModels": "Leave empty until initial owner preference selection (slice 02b). Neither this list nor a tier declaration authorizes a model."
 }

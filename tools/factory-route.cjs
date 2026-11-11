@@ -4,7 +4,7 @@
 // learned from recorded outcomes (or an editable policy file), price comes from what the engine reports.
 //
 //   supply   [--json]                         snapshot of engines/models/evidence -> state/routing/supply.json
-//   route    <profile.json> [--exclude e/m,..] [--avoid engine,..] [--not-engine e] [--json]
+//   route    <profile.json> [--work-kind kind] [--exclude e/m,..] [--avoid engine,..] [--not-engine e] [--json]
 //                                             ranked candidates + routing receipt -> state/routing/receipts/
 //   limit    <engine> [--model m] [--reset ISO] [--model-scoped] --signal "<text>"  record a limit event
 //            (account/engine-wide by default; --model-scoped only when the engine says the limit is per model)
@@ -22,6 +22,7 @@ const HOME = process.env.FACTORY_HATTERA_HOME || path.join(os.homedir(), '.openm
 const STATE = process.env.FACTORY_STATE_DIR || path.join(__dirname, '..', 'state', 'routing');
 const P = {
   config: path.join(HOME, 'config.json'),
+  bots: path.join(HOME, 'bots.json'),
   catalogs: path.join(HOME, 'providers', 'engine-models'),
   usage: path.join(HOME, 'usage'),
   supply: path.join(STATE, 'supply.json'),
@@ -57,6 +58,16 @@ function resetHint(text) {
 }
 
 // ---------- supply
+// Mirror Hattera's configuredBotModels owner gate. Catalog defaults, usage,
+// prices and policy entries are observations/preferences, never permission.
+function configuredModels() {
+  const cfg = readJson(P.config, {}), saved = readJson(P.bots, []);
+  const bots = Array.isArray(saved) ? saved : [];
+  const selections = [cfg.defaultModelSelection, cfg.newBotDefaults?.profile?.modelSelection,
+    ...bots.flatMap(bot => [bot.modelSelection, ...(Array.isArray(bot.tasks) ? bot.tasks : []).map(task => task.modelSelection)])];
+  return new Set(selections.filter(s => typeof s?.instanceId === 'string' && s.instanceId && typeof s.model === 'string' && s.model)
+    .map(s => `${s.instanceId}/${s.model}`));
+}
 function usageRecords() {
   let files = [];
   try { files = fs.readdirSync(P.usage).filter(f => f.endsWith('.jsonl')).sort().slice(-2); } catch {}
@@ -173,7 +184,7 @@ const normalizedPenalty = (value, scale) => value <= scale
   : 1 / (1 + scale / value);
 
 function scoringPolicy(raw) {
-  for (const [key, value] of [...['capability', 'costRank', 'balanced', 'engines', 'models'].map(k => [k, raw[k]]),
+  for (const [key, value] of [...['capability', 'costRank', 'balanced', 'engines', 'models', 'workKindTiers'].map(k => [k, raw[k]]),
     ['balanced.weights', raw.balanced?.weights]]) {
     if (value !== undefined && (!value || typeof value !== 'object' || Array.isArray(value))) {
       throw Error(`invalid routing policy ${key}: expected an object`);
@@ -184,6 +195,12 @@ function scoringPolicy(raw) {
     costRank: {...defaults.costRank, ...raw.costRank},
     balanced: {...defaults.balanced, ...raw.balanced,
       weights: {...defaults.balanced.weights, ...raw.balanced?.weights}}};
+  for (const [kind, tier] of Object.entries(policy.workKindTiers || {})) {
+    if (typeof tier !== 'string' || !tier.trim()) throw Error(`invalid routing policy workKindTiers.${kind}`);
+  }
+  for (const [key, model] of Object.entries(policy.models || {})) {
+    if (model?.tier !== undefined && (typeof model.tier !== 'string' || !model.tier.trim())) throw Error(`invalid routing policy models.${key}.tier`);
+  }
   const finite = (name, value, min, max = Infinity) => {
     if (!Number.isFinite(value) || value < min || value > max) throw Error(`invalid routing policy ${name}`);
   };
@@ -211,6 +228,10 @@ function route(profile, opts = {}) {
   const policy = scoringPolicy(readPolicy());
   const COST_RANK = policy.costRank;
   const snap = opts.snapshot || supply();
+  const authorized = configuredModels();
+  const workKind = opts.workKind ?? profile.workKind;
+  if (workKind !== undefined && (typeof workKind !== 'string' || !workKind.trim())) throw Error('workKind must be a nonempty string');
+  const tier = workKind ? policy.workKindTiers?.[workKind] ?? null : null;
   const limits = activeLimits();
   const proven = capability(policy);
   // Observations are per completed attempt, not catalog claims or authorization.
@@ -239,6 +260,7 @@ function route(profile, opts = {}) {
       const rej = r => rejected.push({candidate: key, reason: r});
       if (policy.models?.[key]?.disabled) { rej('disabled in policy'); continue; }
       if (!m.inCatalog) { rej(m.withdrawnFromCatalog ? 'no longer in engine catalog' : 'no catalog for engine'); continue; }
+      if (!authorized.has(key)) { rej('not owner-authorized in current configured model selections'); continue; }
       if (exclude.has(key) || exclude.has(e.id)) { rej('excluded (failed or in use for this slice)'); continue; }
       if (opts.notEngine && e.id === opts.notEngine) { rej('same engine as builder (verifier must differ)'); continue; }
       const lim = limits.get(key) || limits.get(e.id);
@@ -270,13 +292,24 @@ function route(profile, opts = {}) {
         effort: effortFor(e.id, cx, profile.attempt, policy), usage5hTokens: m.usage?.tokens5h ?? 0, runs: m.usage?.runs ?? 0});
     }
   }
-  // unproven models only ride on low complexity, or as last resort if nothing proven exists
-  const provenSet = cands.filter(c => c.capability.ok === true);
-  let pool = cands;
+  let eligible = cands, fallback = false, fallbackReason = null;
+  if (workKind) {
+    const inTier = tier ? cands.filter(c => policy.models?.[`${c.engine}/${c.model}`]?.tier === tier) : [];
+    if (inTier.length) {
+      eligible = inTier;
+      for (const c of cands.filter(c => !inTier.includes(c))) rejected.push({candidate: `${c.engine}/${c.model}`, reason: `outside tier ${tier} for work kind ${workKind}`});
+    } else {
+      fallback = true;
+      fallbackReason = `No eligible owner-authorized catalog candidates for tier ${tier ?? '(unmapped)'} and work kind ${workKind}; using previous ranking within authorized supply`;
+    }
+  }
+  // Preserve the existing ranking/capability rules within the chosen supply.
+  const provenSet = eligible.filter(c => c.capability.ok === true);
+  let pool = eligible;
   const coldStart = cx !== 'low' && !provenSet.length;
-  if (coldStart) for (const c of cands) c.flags.push('cold start: no proven candidate for ' + cx);
+  if (coldStart) for (const c of eligible) c.flags.push('cold start: no proven candidate for ' + cx);
   if (cx !== 'low' && provenSet.length) {
-    for (const c of cands.filter(c => c.capability.ok !== true)) rejected.push({candidate: `${c.engine}/${c.model}`, reason: `unproven for ${cx}; proven candidates exist`});
+    for (const c of eligible.filter(c => c.capability.ok !== true)) rejected.push({candidate: `${c.engine}/${c.model}`, reason: `unproven for ${cx}; proven candidates exist`});
     pool = provenSet;
   }
   const needUnknown = c => c.flags.filter(f => /^(image input|context size) unknown$/.test(f)).length;
@@ -320,6 +353,8 @@ function route(profile, opts = {}) {
     profile: {complexity: cx, budget, needs, attempt: profile.attempt || 1},
     choice: pool[0] || null,
     coldStart,
+    workKind: workKind ?? null, tier, fallback, fallbackReason,
+    authorization: {source: [P.config, P.bots], rule: 'current configured model selections only'},
     scoring: {policy: budget, ...(budget === 'balanced' ? policy.balanced : {}), capability: policy.capability, costRank: policy.costRank,
       defaultsSource: 'tools/route-defaults.json', overridesSource: P.policy},
     reason: pool[0] ? `${coldStart ? 'COLD START (no proven candidate; record outcomes) — ' : ''}${budget === 'balanced' ? 'lowest measured balanced penalty' : 'cheapest-capable'} for ${cx}/${budget}: cost=${pool[0].cost}, capability=${pool[0].capability.source}${pool[0].flags.length ? ', flags=' + pool[0].flags.join('; ') : ''}` :
@@ -328,6 +363,7 @@ function route(profile, opts = {}) {
     rejected, activeLimits: [...limits.values()],
     effortApplied: 'unknown until the engine confirms; record it in evidence.json',
   };
+  if (fallbackReason) receipt.reason += `; ${fallbackReason}`;
   fs.mkdirSync(P.receipts, {recursive: true});
   const f = path.join(P.receipts, `${(profile.slice || 'adhoc').replace(/[^\w.-]/g, '_')}-${Date.now()}.json`);
   fs.writeFileSync(f, JSON.stringify(receipt, null, 2)); receipt.file = f;
@@ -352,8 +388,9 @@ if (require.main === module) {
         for (const m of used) console.log(`    ran ${m.id}${m.inCatalog ? '' : '  [WITHDRAWN from catalog]'} runs=${m.usage.runs} 5h_tokens=${m.usage.tokens5h}`);
       }
     } else if (cmd === 'route') {
+      const workKind = flag('--work-kind');
       const prof = JSON.parse(readIn(a[0]).replace(/^﻿/, ''));
-      const r = route(prof, {exclude: (flag('--exclude') || '').split(',').filter(Boolean), avoid: (flag('--avoid') || '').split(',').filter(Boolean), notEngine: flag('--not-engine')});
+      const r = route(prof, {workKind, exclude: (flag('--exclude') || '').split(',').filter(Boolean), avoid: (flag('--avoid') || '').split(',').filter(Boolean), notEngine: flag('--not-engine')});
       if (json) console.log(JSON.stringify(r, null, 2));
       else {
         console.log(r.choice ? `CHOICE ${r.choice.engine}/${r.choice.model} effort=${r.choice.effort.requested}` : 'NO CANDIDATE');

@@ -7,6 +7,11 @@ const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hh-')), state = fs.mkdtempSy
 process.env.FACTORY_HATTERA_HOME = home; process.env.FACTORY_STATE_DIR = state;
 fs.mkdirSync(path.join(home, 'providers/engine-models'), {recursive: true}); fs.mkdirSync(path.join(home, 'usage'));
 fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({instances: {alpha: {driverKind: 'a'}, beta: {driverKind: 'b'}}}));
+// Authorization is explicit configuration, independent of catalogs/policy/usage.
+fs.writeFileSync(path.join(home, 'bots.json'), JSON.stringify([
+  ['alpha', 'a-pro'], ['beta', 'b-zen-free'], ['beta', 'b-other'],
+  ['opaque-account', 'opaque-route'], ['provider-91', 'opaque-model-0'], ['another-account-82', 'opaque-model-1'],
+].map(([instanceId, model]) => ({modelSelection: {instanceId, model}}))));
 fs.writeFileSync(path.join(home, 'providers/engine-models/alpha.json'), JSON.stringify({default: 'a-pro', options: [{id: 'a-pro', label: 'A Pro'}, {id: 'a-mini', label: 'A Mini'}]}));
 fs.writeFileSync(path.join(home, 'providers/engine-models/beta.json'), JSON.stringify({default: 'b-zen-free', options: [{id: 'b-zen-free', label: 'Zen Free', priceReported: 'free', contextWindow: 32000}, {id: 'b-other', label: 'Other'}]}));
 const at = new Date().toISOString();
@@ -226,4 +231,102 @@ test('finite extreme observations retain finite measured means and persisted sco
     fs.writeFileSync(R.P.outcomes, '');
     fs.rmSync(R.P.policy, {force: true});
   }
+});
+
+const tierPolicy = () => ({workKindTiers: {implement: 'worker', review: 'premium'}, models: {
+  'alpha/a-pro': {tier: 'premium'}, 'beta/b-zen-free': {tier: 'worker'},
+  'beta/b-other': {tier: 'worker', costClass: 'subscription'}, 'alpha/a-mini': {tier: 'worker', costClass: 'free'},
+}});
+test('work-kind intersection ranks only authorized catalog models within the requested tier', () => {
+  fs.writeFileSync(R.P.limits, ''); fs.writeFileSync(R.P.outcomes, '');
+  fs.writeFileSync(R.P.policy, JSON.stringify(tierPolicy()));
+  try {
+    const worker = R.route({complexity: 'low', workKind: 'implement'});
+    assert.equal(worker.choice.model, 'b-zen-free');
+    assert.equal(worker.fallback, false);
+    assert.equal(worker.tier, 'worker');
+    assert.ok(worker.fallbacks.some(c => c.model === 'b-other'), 'more expensive worker remains a fallback within tier');
+    assert.ok(worker.rejected.some(r => r.candidate === 'alpha/a-mini' && /not owner-authorized/.test(r.reason)));
+    const review = R.route({complexity: 'low', workKind: 'review'});
+    assert.equal(review.choice.model, 'a-pro');
+    assert.equal(review.fallback, false);
+    const legacy = R.route({complexity: 'low'});
+    assert.equal(legacy.choice.model, 'b-zen-free', 'no work kind retains existing ranking for authorized supply');
+    assert.equal(legacy.workKind, null);
+    assert.equal(legacy.fallback, false);
+  } finally { fs.rmSync(R.P.policy, {force: true}); }
+});
+
+test('empty authorized tier falls back with persisted tier/work-kind reason, never policy authorization', () => {
+  fs.writeFileSync(R.P.policy, JSON.stringify({workKindTiers: {implement: 'worker'}, models: {
+    'alpha/a-pro': {tier: 'premium'}, 'alpha/a-mini': {tier: 'worker', costClass: 'free'},
+  }}));
+  try {
+    const r = R.route({complexity: 'low', workKind: 'implement'});
+    assert.equal(r.choice.model, 'b-zen-free');
+    assert.equal(r.fallback, true);
+    assert.match(r.fallbackReason, /tier worker.*work kind implement/);
+    assert.match(r.reason, /tier worker.*work kind implement/);
+    assert.equal(JSON.parse(fs.readFileSync(r.file, 'utf8')).fallback, true);
+    assert.ok(!r.fallbacks.some(c => c.model === 'a-mini'));
+  } finally { fs.rmSync(R.P.policy, {force: true}); }
+});
+
+test('authorization is current configured state, not policy, catalog default or prior execution', () => {
+  const bots = fs.readFileSync(R.P.bots, 'utf8');
+  fs.writeFileSync(R.P.policy, JSON.stringify(tierPolicy()));
+  try {
+    fs.writeFileSync(R.P.bots, '[]');
+    for (const workKind of [undefined, 'implement']) {
+      const denied = R.route({complexity: 'low', ...(workKind ? {workKind} : {})});
+      assert.equal(denied.choice, null);
+      assert.ok(denied.rejected.some(r => r.candidate === 'alpha/a-pro' && /not owner-authorized/.test(r.reason)));
+    }
+    fs.writeFileSync(R.P.bots, bots);
+    assert.equal(R.route({complexity: 'low', workKind: 'implement'}).choice.model, 'b-zen-free');
+  } finally { fs.writeFileSync(R.P.bots, bots); fs.rmSync(R.P.policy, {force: true}); }
+});
+
+test('CLI --work-kind overrides the profile and records the resolved tier', () => {
+  const {spawnSync} = require('node:child_process');
+  const profile = path.join(state, 'cli-profile.json');
+  fs.writeFileSync(profile, JSON.stringify({complexity: 'low', workKind: 'implement'}));
+  fs.writeFileSync(R.P.policy, JSON.stringify(tierPolicy()));
+  try {
+    const result = spawnSync(process.execPath, [path.join(__dirname, 'factory-route.cjs'), 'route', profile,
+      '--work-kind', 'review', '--json'], {encoding: 'utf8', env: process.env});
+    assert.equal(result.status, 0, result.stderr);
+    const receipt = JSON.parse(result.stdout);
+    assert.equal(receipt.choice.model, 'a-pro');
+    assert.equal(receipt.workKind, 'review');
+    assert.equal(receipt.tier, 'premium');
+  } finally { fs.rmSync(R.P.policy, {force: true}); }
+});
+
+test('workspace, new-bot and conversation configured selections each grant only their exact identity', () => {
+  const cfg = fs.readFileSync(R.P.config, 'utf8'), bots = fs.readFileSync(R.P.bots, 'utf8');
+  const selection = {instanceId: 'alpha', model: 'a-pro'};
+  try {
+    for (const source of ['workspace', 'new-bot', 'conversation']) {
+      const config = JSON.parse(cfg);
+      if (source === 'workspace') config.defaultModelSelection = selection;
+      if (source === 'new-bot') config.newBotDefaults = {profile: {modelSelection: selection}};
+      fs.writeFileSync(R.P.config, JSON.stringify(config));
+      fs.writeFileSync(R.P.bots, JSON.stringify(source === 'conversation' ? [{tasks: [{modelSelection: selection}]}] : []));
+      const r = R.route({complexity: 'low'});
+      assert.equal(r.choice.model, 'a-pro', source);
+      assert.equal(r.fallbacks.length, 0, 'other catalog choices remain unauthorized');
+    }
+  } finally { fs.writeFileSync(R.P.config, cfg); fs.writeFileSync(R.P.bots, bots); }
+});
+
+test('invalid tier policy fails explicitly before writing a route receipt', () => {
+  const count = fs.readdirSync(R.P.receipts).length;
+  try {
+    for (const policy of [{workKindTiers: []}, {workKindTiers: {implement: ''}}, {models: {'alpha/a-pro': {tier: 2}}}]) {
+      fs.writeFileSync(R.P.policy, JSON.stringify(policy));
+      assert.throws(() => R.route({complexity: 'low', workKind: 'implement'}), /invalid routing policy/);
+      assert.equal(fs.readdirSync(R.P.receipts).length, count);
+    }
+  } finally { fs.rmSync(R.P.policy, {force: true}); }
 });
