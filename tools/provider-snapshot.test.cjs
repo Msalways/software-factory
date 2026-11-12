@@ -133,3 +133,39 @@ test('conflicting native hierarchy values cannot be hidden by equal normalized t
   const a=input();add(a,'tier',{nativeTier:'standard',normalized:'worker'});add(a,'tier',{nativeTier:'economy',normalized:'worker'});
   const r=resolve(a);assert.equal(r.hierarchy.value,'unknown');assert.match(r.hierarchy.reasons.join(),/conflicting/);
 });
+
+function completePreferenceInput(){
+  const a=input();
+  a.engine.retirementGenerations['engine-x/retired']=1;
+  a.engine.modelRoutes['engine-x/retired']={providerId:'provider-x',routeScope:scope};
+  add(a,'tier',{nativeTier:'standard',normalized:'worker'});
+  add(a,'price',{currency:'USD',unit:'token',input:1,output:2,basis:'account'});
+  add(a,'toolUse',true);add(a,'imageInput',false);add(a,'contextTokens',32000);
+  const r=resolve(a);assert.equal(r.decisionState.needsUserChoice,false,'all other evidence must be resolved so it cannot mask preference failure');
+  a.preference={chosen:[key],offered:[key],askedAt:'2026-11-12T08:30:00Z',confirmedBy:'user',sourceRef:'fixtures/project-preference.json',catalogFingerprint:r.catalogFingerprint,scope:'catalog'};
+  return a;
+}
+for(const [name,chosen,offered] of [
+  ['foreign-only',['foreign/absent'],['foreign/absent']],
+  ['same-engine absent',['engine-x/missing'],['engine-x/missing']],
+  ['retired-only',['engine-x/retired'],['engine-x/retired']],
+  ['mixed foreign offered',[key],[key,'foreign/absent']],
+  ['mixed foreign chosen',[key,'foreign/absent'],[key,'foreign/absent']],
+  ['mixed retired offered',[key],[key,'engine-x/retired']],
+  ['mixed absent chosen',[key,'engine-x/missing'],[key,'engine-x/missing']],
+])test(`catalog-bound preference invalidates ${name} without silently filtering`,()=>{
+  const a=completePreferenceInput();a.preference.chosen=chosen;a.preference.offered=offered;
+  const before=copy(a),r=resolve(a);assert.deepEqual(a,before);
+  assert.equal(r.decisionState.needsUserChoice,true);
+  assert.match(r.decisionState.reasons.join(),/preference key not in bound current engine catalog/);
+  assert.equal(r.decisionState.excludedAnswers[0].sourceRef,a.preference.sourceRef);
+  assert.match(r.decisionState.excludedAnswers[0].reasons.join(),/not in bound current engine catalog/);
+  assert.equal(r.hierarchy.value,'worker');assert.equal('allowed' in r,false);
+});
+test('valid current-catalog preference remains resolved while duplicate/not-offered choices remain invalid',()=>{
+  const a=completePreferenceInput(),r=resolve(a);
+  assert.equal(r.decisionState.needsUserChoice,false);assert.deepEqual(r.decisionState.reasons,[]);assert.deepEqual(r.decisionState.excludedAnswers,[]);
+  for(const [chosen,offered,reason] of [
+    [[key,key],[key],/duplicate preference keys/],[[key],[key,key],/duplicate preference keys/],[[key],[],/chosen key not offered/],
+  ]){const b=copy(a);b.preference.chosen=chosen;b.preference.offered=offered;const invalid=resolve(b);assert.equal(invalid.decisionState.needsUserChoice,true);assert.match(invalid.decisionState.reasons.join(),reason);}
+});

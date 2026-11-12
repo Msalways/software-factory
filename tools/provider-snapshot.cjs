@@ -157,7 +157,10 @@ function resolveModelEvidence(input) {
     if(preference.scope!=='catalog'||preference.catalogFingerprint!==catalogFingerprint)preferenceReasons.push('catalog preference binding mismatch');
     if(!Array.isArray(preference.chosen)||!Array.isArray(preference.offered)||!preference.chosen.length)preferenceReasons.push('invalid preference keys');
     else {
-      for(const k of [...preference.chosen,...preference.offered])identity(k);
+      for(const k of new Set([...preference.chosen,...preference.offered])){
+        identity(k);
+        if(!current.has(k))preferenceReasons.push(`preference key not in bound current engine catalog: ${k}`);
+      }
       if(new Set(preference.chosen).size!==preference.chosen.length||new Set(preference.offered).size!==preference.offered.length)preferenceReasons.push('duplicate preference keys');
       if(preference.chosen.some(k=>!preference.offered.includes(k)))preferenceReasons.push('chosen key not offered');
     }
