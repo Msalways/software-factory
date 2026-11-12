@@ -395,6 +395,13 @@ function route(profile, opts = {}) {
   return receipt;
 }
 
+function parseSourceJson(text) {
+  const ok=(value,message)=>{if(!value)throw Error(message);};
+    const tokens=text.replace(/^\uFEFF/,'').match(/"(?:\\.|[^"\\])*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null|[{}\[\]:,]|\S/g)||[];let i=0;
+    function value(){const t=tokens[i++];if(t==='{'){const names=new Set();if(tokens[i]!=='}')do{const name=JSON.parse(tokens[i++]);ok(typeof name==='string'&&!names.has(name)&&!['__proto__','prototype','constructor'].includes(name),'duplicate/unsafe JSON key');names.add(name);ok(tokens[i++]===':','invalid JSON');value();if(tokens[i]!==',')break;i++;}while(true);ok(tokens[i++]==='}','invalid JSON');}else if(t==='['){if(tokens[i]!==']')do{value();if(tokens[i]!==',')break;i++;}while(true);ok(tokens[i++]===']','invalid JSON');}else ok(t!==undefined&&/^(?:"|true$|false$|null$|-?\d)/.test(t),'invalid JSON');}
+    value();ok(i===tokens.length,'invalid JSON');return JSON.parse(text.replace(/^\uFEFF/,''));
+  }
+
 // Independently current, read-only source boundary. Attestations are not provider authentication.
 function readCurrentSources({project,sessionId,now:time}) {
   const {fingerprint:H,resolveModelEvidence}=require('./provider-snapshot.cjs');
@@ -409,11 +416,7 @@ function readCurrentSources({project,sessionId,now:time}) {
   const exact=(v,fields)=>{object(v);ok(Object.keys(v).sort().join()===fields.slice().sort().join(),'unexpected/missing fields');};
   safe(project);ok(str(sessionId)&&Number.isFinite(time),'session/time required');
   // Token walk detects duplicate object names before JSON.parse can overwrite them.
-  function parse(text) {
-    const tokens=text.replace(/^\uFEFF/,'').match(/"(?:\\.|[^"\\])*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null|[{}\[\]:,]|\S/g)||[];let i=0;
-    function value(){const t=tokens[i++];if(t==='{'){const names=new Set();if(tokens[i]!=='}')do{const name=JSON.parse(tokens[i++]);ok(typeof name==='string'&&!names.has(name)&&!['__proto__','prototype','constructor'].includes(name),'duplicate/unsafe JSON key');names.add(name);ok(tokens[i++]===':','invalid JSON');value();if(tokens[i]!==',')break;i++;}while(true);ok(tokens[i++]==='}','invalid JSON');}else if(t==='['){if(tokens[i]!==']')do{value();if(tokens[i]!==',')break;i++;}while(true);ok(tokens[i++]===']','invalid JSON');}else ok(t!==undefined&&/^(?:"|true$|false$|null$|-?\d)/.test(t),'invalid JSON');}
-    value();ok(i===tokens.length,'invalid JSON');return JSON.parse(text.replace(/^\uFEFF/,''));
-  }
+  const parse=parseSourceJson;
   const stats=new Map(),missing={state:'missing',value:null},present=value=>({state:'present',value});
   const stat=file=>{try{const s=fs.statSync(file);ok(s.isFile()&&Number.isFinite(s.mtimeMs)&&s.mtimeMs>=0&&Number.isSafeInteger(s.size),'invalid file metadata');return {mtimeMs:s.mtimeMs,size:s.size};}catch(e){if(e.code==='ENOENT')return null;throw e;}};
   function read(file,required=false,jsonl=false){const before=stat(file);stats.set(file,before);if(before===null){ok(!required,'required source missing: '+file);return null;}const text=fs.readFileSync(file,'utf8');const v=jsonl?text.split(/\r?\n/).filter(x=>x.trim()).map(parse):parse(text);ok(v!==null,'present source cannot be null');ok(H(stat(file))===H(before),'source changed while reading');return v;}
@@ -457,6 +460,51 @@ const generations={...e.retirementGenerations};ok(Object.hasOwn(generations,r.ke
   return {preimages,currentFingerprints:Object.fromEntries(Object.entries(preimages).map(([k,v])=>[k,H(v)])),routeScopes,captureValidUntil:capture.validUntil,inputs:{configured,nativeBindingPreimage,nativeFingerprint,engines:inputsEngines,evidence:records,decisions:modelDecisions,preference:pref,history,allowlist:sortedAllow,policy:preimages.policy,limits:events??[]},revalidate};
 }
 
+// These imports attest user/operator records; they do not authenticate the user or authorize models.
+function recordProviderInput(command,project,file) {
+  const {fingerprint:H,resolveModelEvidence}=require('./provider-snapshot.cjs');
+  const fail=(value,message)=>{if(!value)throw Error(message);};
+  const shape=(v,fields)=>fail(v&&typeof v==='object'&&!Array.isArray(v)&&Object.keys(v).sort().join()===fields.slice().sort().join(),'invalid record fields');
+  const source=readCurrentSources({project,sessionId:process.env.FACTORY_SESSION_ID,now:Date.now()});
+  fail(typeof file==='string'&&file.length>0,'--file required');
+  const envelope=parseSourceJson(fs.readFileSync(file,'utf8'));H(envelope);
+  const when=(v,future=false)=>{const t=typeof v==='string'?Date.parse(v):NaN;fail(Number.isFinite(t)&&(future||t<=Date.now()),'invalid/future record timestamp');return t;};
+  const reference=v=>{fail(typeof v==='string'&&v.trim()&&!/[\r\n]/.test(v),'explicit user/source reference required');if(/^https:/i.test(v)){const u=new URL(v);fail(!u.username&&!u.password&&![...u.searchParams.keys()].some(k=>/token|key|secret|password|credential/i.test(k)),'unsafe reference');}else fail((!/^[a-z][a-z\d+.-]*:/i.test(v)||/^[a-z]:[\\/]/i.test(v))&&!v.split(/[\\/]/).includes('..'),'unsafe reference');};
+  const member=k=>{fail(typeof k==='string','model key required');const e=source.inputs.engines.find(e=>e.options.some(o=>e.id+'/'+o.id===k));fail(e&&source.routeScopes[k],'unknown/retired model identity');fail(source.inputs.history?.engines[e.id]?.lastKeys.includes(k)&&Object.hasOwn(e.retirementGenerations,k),'current catalog history required');return e;};
+  const authorized=k=>{const e=member(k);fail(source.inputs.configured.includes(k)&&source.inputs.allowlist.some(a=>(typeof a==='string'?a:a.id)===k),'model not owner authorized');return e;};
+  const resolve=(k,records=source.inputs.evidence,decision=null,preference=null)=>{const e=member(k),engine={...e,evidence:records.filter(r=>r.key.startsWith(e.id+'/'))};return resolveModelEvidence({key:k,modelOption:e.options.find(o=>e.id+'/'+o.id===k),engine,routeScope:source.routeScopes[k].routeScope,evidence:engine.evidence.filter(r=>r.key===k),decision,preference,retired:{isRetired:false,retirementGeneration:e.retirementGenerations[k]},now:Date.now()});};
+  let target,value,deadline=Infinity;
+  if(command==='evidence-import'){
+    shape(envelope,['schema','records']);fail(envelope.schema===1&&Array.isArray(envelope.records),'schema1 evidence envelope required');
+    const ids=new Set();for(const r of envelope.records){shape(r,['key','providerId','routeScope','field','value','kind','status','confidence','sourceRef','observedAt','validUntil','catalogFingerprint']);member(r.key);reference(r.sourceRef);const at=when(r.observedAt),until=when(r.validUntil,true);fail(until>at&&until>Date.now(),'invalid/expired evidence bounds');deadline=Math.min(deadline,until);const id=JSON.stringify([r.key,r.field,r.sourceRef]);fail(!ids.has(id),'duplicate evidence record');ids.add(id);const route=source.routeScopes[r.key];fail(r.providerId===route.providerId&&r.routeScope===route.routeScope,'provider/account identity mismatch');}
+    const identity=r=>JSON.stringify([r.key,r.field,r.sourceRef]);value={schema:1,records:[...source.inputs.evidence.filter(r=>!ids.has(identity(r))),...envelope.records]};
+    // Full proposed engine claims are validated before mutation; bindings are never rewritten.
+    for(const r of envelope.records){const result=resolve(r.key,value.records);fail(r.catalogFingerprint===result.rawCatalogFingerprint,'stale raw catalog binding');}
+    H(value);target=path.join(STATE,'provider-evidence.json');
+  }else{
+    shape(envelope,['schema','kind','value']);fail(envelope.schema===1&&['model-decision','premium-approval','opencode-preference'].includes(envelope.kind),'unsupported model record envelope');
+    const v=envelope.value;
+    if(envelope.kind==='model-decision'){
+      shape(v,['key','tier','preferenceRank','confirmedBy','confirmedAt','sourceRef','modelFingerprint','catalogFingerprint','retirementGeneration','scope']);authorized(v.key);when(v.confirmedAt);reference(v.sourceRef);
+      const {key,...answer}=v,result=resolve(key,source.inputs.evidence,answer);fail(answer.modelFingerprint===result.modelFingerprint&&!result.decisionState.excludedAnswers.length&&!(answer.preferenceRank!==null&&result.decisionState.preferenceRank===null),'invalid/stale model answer');
+    }else if(envelope.kind==='premium-approval'){
+      shape(v,['slice','keys','profileHash','approvedBy','approvedAt','expiresAt','sourceRef']);fail(typeof v.slice==='string'&&/^[\w.-]+$/.test(v.slice)&&!['.','..','__proto__','prototype','constructor'].includes(v.slice),'safe slice required');fail(Array.isArray(v.keys)&&v.keys.length&&new Set(v.keys).size===v.keys.length,'unique approval keys required');v.keys.forEach(authorized);reference(v.sourceRef);fail(v.approvedBy==='user'&&/^[a-f0-9]{64}$/.test(v.profileHash),'explicit user/profile approval required');const start=when(v.approvedAt),end=when(v.expiresAt,true);fail(end>start&&end>Date.now(),'invalid/expired approval');deadline=end;
+    }else{
+      shape(v,['chosen','offered','askedAt','confirmedBy','sourceRef','catalogFingerprint','scope']);fail(Array.isArray(v.chosen)&&v.chosen.length&&Array.isArray(v.offered)&&v.offered.length,'preference keys required');const engine=authorized(v.chosen[0]);fail(engine.driver==='opencodeGo','OpenCode engine required');for(const k of [...v.chosen,...v.offered])fail(authorized(k).id===engine.id,'catalog preference spans engines');when(v.askedAt);reference(v.sourceRef);const result=resolve(v.chosen[0],source.inputs.evidence,null,v);fail(!result.decisionState.excludedAnswers.length,'invalid/stale catalog preference');
+    }
+    value=source.preimages.policy.source==='missing'?{}:parseSourceJson(fs.readFileSync(P.policy,'utf8'));value.projects??={};value.projects[project]??={};const dest=value.projects[project];
+    if(envelope.kind==='model-decision'){dest.modelDecisions??={};const {key,...answer}=v;dest.modelDecisions[key]=answer;}
+    else if(envelope.kind==='premium-approval'){dest.premiumApprovals??={};const {slice,...answer}=v;dest.premiumApprovals[slice]=answer;}
+    else dest.opencodePreference=v;
+    H(value);target=P.policy;
+  }
+  // Exclusive per-target mutation plus re-stat prevents concurrent imports from losing updates.
+  const lock=target+'.lock',temp=target+'.'+require('node:crypto').randomUUID()+'.tmp';let locked=false,committed=false,cleanupPending=false;
+  try{const fd=fs.openSync(lock,'wx',0o600);locked=true;fs.closeSync(fd);source.revalidate(Date.now());fail(Date.now()<deadline,'record expired before mutation');fs.writeFileSync(temp,JSON.stringify(value,null,2)+'\n',{flag:'wx',mode:0o600});source.revalidate(Date.now());fail(Date.now()<deadline,'record expired before mutation');fs.renameSync(temp,target);committed=true;}
+  finally{if(fs.existsSync(temp))fs.unlinkSync(temp);if(locked)try{fs.unlinkSync(lock);}catch(error){if(!committed)throw error;cleanupPending=true;}}
+  return {schema:1,command,project,recorded:true,attestationOnly:true,cleanupPending};
+}
+
 // ---------- CLI
 if (require.main === module) {
   const a = process.argv.slice(2);
@@ -466,7 +514,11 @@ if (require.main === module) {
   const json = has('--json');
   const cmd = a.shift();
   try {
-    if (cmd === 'receipt') {
+    if (cmd === 'evidence-import' || cmd === 'model-record') {
+      const file=flag('--file'),project=cmd==='model-record'?a.shift():process.env.FACTORY_PROJECT_ID;
+      if(a.length)throw Error('unexpected record arguments');
+      console.log(JSON.stringify(recordProviderInput(cmd,project,file)));
+    } else if (cmd === 'receipt') {
       const [file, action, data] = a;
       const payload = ['report', 'escalate'].includes(action) ? JSON.parse(readIn(data).replace(/^\uFEFF/, '')) : data;
       const result = action === 'show' ? sliceReceipt.load(file) : sliceReceipt.update(file, action, payload);
