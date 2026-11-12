@@ -4,6 +4,8 @@
 // learned from recorded outcomes (or an editable policy file), price comes from what the engine reports.
 //
 //   supply   [--json]                         snapshot of engines/models/evidence -> state/routing/supply.json
+//   allowlist <project> (--add e/m,... --source text | --remove e/m,... | --show)
+//   snapshot <project> [--team-setup file|-] [--captured-at ISO] [--evidence file] [--json]
 //   route    <profile.json> [--work-kind kind] [--exclude e/m,..] [--avoid engine,..] [--not-engine e] [--json]
 //                                             ranked candidates + routing receipt -> state/routing/receipts/
 //   limit    <engine> [--model m] [--reset ISO] [--model-scoped] --signal "<text>"  record a limit event
@@ -19,6 +21,7 @@ const os = require('node:os');
 const defaults = require('./route-defaults.json');
 const opencode = require('./opencode-discovery.cjs');
 const sliceReceipt = require('./slice-receipt.cjs');
+const snapshotLib = require('./provider-snapshot.cjs');
 
 const HOME = process.env.FACTORY_HATTERA_HOME || path.join(os.homedir(), '.openmausbot');
 const STATE = process.env.FACTORY_STATE_DIR || path.join(__dirname, '..', 'state', 'routing');
@@ -32,6 +35,7 @@ const P = {
   outcomes: path.join(STATE, 'outcomes.jsonl'),
   policy: path.join(STATE, 'route-policy.json'),
   discovery: path.join(STATE, 'opencode-discovery.json'),
+  snapshots: path.join(STATE, 'project-provider-snapshots'),
   receipts: path.join(STATE, 'receipts'),
       };
 const LEVELS = ['low', 'medium', 'high'];
@@ -172,6 +176,74 @@ function readPolicy() {
     return policy;
   } catch (error) { throw new Error(`Invalid routing policy ${P.policy}: ${error.message}`, {cause: error}); }
 }
+
+function projectId(p) { if (typeof p !== 'string' || !/^[\w.-]+$/.test(p) || ['.', '..', '__proto__', 'constructor', 'prototype'].includes(p)) throw Error('usage: project id must match [A-Za-z0-9_.-]+'); return p; }
+function snapshotPath(project) { return path.join(P.snapshots, projectId(project) + '.json'); }
+function snapshotSettings(raw) {
+  if (raw.snapshot !== undefined && (!raw.snapshot || typeof raw.snapshot !== 'object' || Array.isArray(raw.snapshot))) throw Error('invalid routing policy snapshot: expected object');
+  const settings = {maxAgeMinutes: 60, catalogStaleHours: 24, ...raw.snapshot};
+  for (const key of ['maxAgeMinutes', 'catalogStaleHours']) if (!Number.isFinite(settings[key]) || settings[key] <= 0) throw Error(`invalid routing policy snapshot: ${key} must be positive and finite`);
+  return settings;
+}
+function allowlistIds(raw, project) { return (raw.projects?.[project]?.allowlist || []).map(e => typeof e === 'string' ? e : e.id); }
+function mtimeOf(p) { try { return fs.statSync(p).mtime.toISOString(); } catch { return null; } }
+
+// Reconciles frozen readCurrentSources attestation + buildSnapshot assembly behind one atomic write;
+// never trusts a prior snapshot file, never widens scope beyond the attested/retained identities.
+function takeSnapshot(project, {teamSetupText = null, teamSetupPath = null, capturedAt = null, evidenceFile = null} = {}) {
+  projectId(project);
+  if (evidenceFile !== null) recordProviderInput('evidence-import', project, evidenceFile);
+  const sessionId = process.env.FACTORY_SESSION_ID;
+  const t = now();
+  const source = readCurrentSources({project, sessionId, now: t});
+  const raw = readPolicy();
+  const settings = snapshotSettings(raw);
+  const capRemainingMinutes = (Date.parse(source.captureValidUntil) - t) / 60000;
+  const maxAgeMinutes = Math.min(settings.maxAgeMinutes, capRemainingMinutes);
+  let teamSetup = null;
+  if (teamSetupText !== null) {
+    let data = null;
+    try { data = JSON.parse(teamSetupText.replace(/^﻿/, '')); } catch {}
+    let at;
+    if (capturedAt !== null) at = Date.parse(capturedAt);
+    else if (teamSetupPath && teamSetupPath !== 'stdin') at = Date.parse(mtimeOf(teamSetupPath));
+    else at = t; // stdin observed time: trust is limited to this process's own clock
+    if (!Number.isFinite(at) || at > t) throw Error('invalid/future team-setup capture time');
+    teamSetup = {path: teamSetupPath, capturedAt: new Date(at).toISOString(), data};
+  }
+  const discovery = readJson(P.discovery, null);
+  const rawSupply = supply();
+  const optionsById = new Map(source.inputs.engines.map(e => [e.id, e.options]));
+  const supplyForSnapshot = {...rawSupply, engines: rawSupply.engines.map(e => ({...e, options: optionsById.get(e.id) ?? []}))};
+  // Every retained generation (current or tombstoned) is carried through; absent entries never become generation 0.
+  const retired = {};
+  for (const e of source.inputs.engines) {
+    const currentIds = new Set(e.options.map(o => e.id + '/' + o.id));
+    for (const [k, generation] of Object.entries(e.retirementGenerations)) {
+      const isRetired = !currentIds.has(k);
+      retired[k] = {isRetired, retirementGeneration: generation, ...(isRetired ? {} : {modelOption: e.options.find(o => e.id + '/' + o.id === k)})};
+    }
+  }
+  const allowlist = allowlistIds(raw, project);
+  const snap = snapshotLib.buildSnapshot({
+    project, now: t, maxAgeMinutes, catalogStaleHours: settings.catalogStaleHours,
+    supply: supplyForSnapshot, configured: source.inputs.configured, allowlist, teamSetup,
+    opencode: opencode.preference(discovery, raw), policy: source.inputs.policy,
+    sources: {config: {path: P.config, mtime: mtimeOf(P.config)}, bots: {path: P.bots, mtime: mtimeOf(P.bots)},
+      catalogs: {dir: P.catalogs}, policy: {path: P.policy, mtime: mtimeOf(P.policy)},
+      opencodeDiscovery: {path: P.discovery, observedAt: discovery?.observedAt ?? null}},
+    evidence: source.inputs.evidence, decisions: source.inputs.decisions, preference: source.inputs.preference,
+    routeScopes: source.routeScopes, activeLimits: [...activeLimits(t).values()], retired,
+    currentFingerprints: source.currentFingerprints,
+  });
+  source.revalidate(now()); // sources must still be unchanged/unexpired at the moment of write
+  fs.mkdirSync(P.snapshots, {recursive: true});
+  const temp = snapshotPath(project) + '.' + require('node:crypto').randomUUID() + '.tmp';
+  fs.writeFileSync(temp, JSON.stringify(snap, null, 2), {flag: 'wx', mode: 0o600});
+  fs.renameSync(temp, snapshotPath(project));
+  return snap;
+}
+function loadSnapshot(project) { return readJson(snapshotPath(project), null); }
 
 // For nonnegative finite observations, differences and incremental means cannot
 // overflow as a raw sum can. Empty samples alone represent unknown measurements.
@@ -534,6 +606,43 @@ if (require.main === module) {
       raw.opencodePreference = {chosen: [...new Set(chosen)], askedAt: new Date().toISOString(), offered: state.options};
       fs.mkdirSync(STATE, {recursive: true}); fs.writeFileSync(P.policy, JSON.stringify(raw, null, 2));
       console.log(JSON.stringify(raw.opencodePreference));
+    } else if (cmd === 'allowlist') {
+      const p = projectId(a.shift()), add = flag('--add'), remove = flag('--remove'), show = has('--show');
+      const source = flag('--source'), confirmedBy = flag('--confirmed-by');
+      if (Number(add !== undefined) + Number(remove !== undefined) + Number(show) !== 1 || a.length ||
+        (add !== undefined && (typeof source !== 'string' || !source.trim())) ||
+        (add === undefined && (source !== undefined || confirmedBy !== undefined))) throw Error('usage: allowlist <project> --add ids --source text | --remove ids | --show');
+      const ids = (add ?? remove ?? '').split(',').filter(Boolean);
+      if (!show && (!ids.length || ids.some(id => !/^[^/\s]+\/\S+$/.test(id)))) throw Error('usage: model ids must be engine/model');
+      const raw = readPolicy();
+      let list = raw.projects?.[p]?.allowlist || [];
+      if (add !== undefined) {
+        const configured = configuredModels();
+        for (const id of ids) {
+          list = list.filter(e => (typeof e === 'string' ? e : e.id) !== id);
+          // Authorization only: never assigns a tier here; tier stays an owner-recorded model decision.
+          list.push({id, confirmedBy: confirmedBy || 'user', confirmedAt: new Date().toISOString(), source});
+          if (!configured.has(id)) console.error(`warning: ${id} is not a configured model selection; the snapshot will refuse it until the owner selects it`);
+        }
+      } else if (remove !== undefined) list = list.filter(e => !ids.includes(typeof e === 'string' ? e : e.id));
+      if (!show) {
+        raw.projects ||= {}; raw.projects[p] ||= {}; raw.projects[p].allowlist = list;
+        fs.mkdirSync(STATE, {recursive: true}); fs.writeFileSync(P.policy, JSON.stringify(raw, null, 2));
+      }
+      console.log(JSON.stringify(list, null, 2));
+    } else if (cmd === 'snapshot') {
+      const hasCapture = a.includes('--team-setup'), hasCapturedAt = a.includes('--captured-at'), hasEvidence = a.includes('--evidence');
+      const project = projectId(a.shift()), captureFile = flag('--team-setup'), explicitAt = flag('--captured-at'), evidenceFile = flag('--evidence');
+      if (a.length || (hasCapture && captureFile === undefined) || (hasCapturedAt && explicitAt === undefined) || (hasEvidence && evidenceFile === undefined) ||
+        (explicitAt !== undefined && !Number.isFinite(Date.parse(explicitAt)))) throw Error('usage: snapshot <project> [--team-setup file|-] [--captured-at ISO] [--evidence file]');
+      const teamSetupText = captureFile === undefined ? null : readIn(captureFile);
+      const snap = takeSnapshot(project, {teamSetupText, teamSetupPath: captureFile === '-' ? 'stdin' : captureFile ?? null, capturedAt: explicitAt ?? null, evidenceFile: evidenceFile ?? null});
+      if (!allowlistIds(readPolicy(), project).length) console.error(`warning: no allowlist for ${project}; every model is refused until the user confirms one (allowlist --add)`);
+      if (json) console.log(JSON.stringify(snap, null, 2));
+      else {
+        console.log(`SNAPSHOT ${project} hash=${snap.hash} expires=${snap.expiresAt} teamSetup=${snap.sources.teamSetup.status}`);
+        for (const m of snap.models) console.log(m.authorization.status === 'allowed' ? `  ALLOWED ${m.key}${m.authorization.flags.length ? '  flags: ' + m.authorization.flags.join(', ') : ''}` : `  REFUSED ${m.key}: ${m.authorization.reasons.join('; ')}`);
+      }
     } else if (cmd === 'supply') {
       const s = supply();
       if (json) console.log(JSON.stringify(s, null, 2));
@@ -581,8 +690,8 @@ if (require.main === module) {
       Object.assign(o, measured);
       append(P.outcomes, o); console.log(JSON.stringify(o));
     } else {
-      console.error('commands: supply | route | receipt | opencode-discover | opencode-prefer | limit | detect | outcome | classify (see header)'); process.exit(2);
+      console.error('commands: supply | allowlist | snapshot | route | receipt | opencode-discover | opencode-prefer | limit | detect | outcome | classify (see header)'); process.exit(2);
     }
   } catch (e) { console.error(e.message); process.exit(2); }
 }
-module.exports = {classify, supply, route, recordLimit, activeLimits, P, readCurrentSources};
+module.exports = {classify, supply, route, recordLimit, activeLimits, P, readCurrentSources, takeSnapshot, loadSnapshot, snapshotPath};

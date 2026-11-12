@@ -65,3 +65,88 @@ test('existing per-target lock refuses atomically and is not removed by another 
 test('current-source validation does not trust a stale snapshot map',()=>{commandSetup();write(path.join(state,'project-provider-snapshots',project+'.json'),{schema:1,hash:'stale'});const a=record(),beforeSnapshot=fs.readFileSync(path.join(state,'project-provider-snapshots',project+'.json'),'utf8');assert.equal(cli('model-record',a).status,0);assert.equal(fs.readFileSync(path.join(state,'project-provider-snapshots',project+'.json'),'utf8'),beforeSnapshot);});
 test('inferred observations remain unknown and do not add authorization',()=>{commandSetup();const a=evidence();a.records[0].field='tier';a.records[0].status='inferred';a.records[0].value={nativeTier:'unproven',normalized:'worker'};assert.equal(cli('evidence-import',a).status,0);assert.equal(resolution().hierarchy.value,'unknown');assert.deepEqual(JSON.parse(fs.readFileSync(path.join(state,'route-policy.json'))).projects[project].allowlist,[key]);});
 test('catalog-scoped answer also requires its exact current target model fingerprint',()=>{commandSetup();const a=record();a.value.scope='catalog';a.value.preferenceRank=0;a.value.modelFingerprint='0'.repeat(64);const before=stateBytes();assert.equal(cli('model-record',a).status,2);assert.deepEqual(stateBytes(),before);});
+
+// ---------- allowlist / snapshot (S2)
+process.env.FACTORY_SESSION_ID=sessionId;
+const {takeSnapshot,loadSnapshot}=require('./factory-route.cjs');
+function runCli(args,extraEnv={}){return spawnSync(process.execPath,[path.join(__dirname,'factory-route.cjs'),...args],{env:{...process.env,FACTORY_SESSION_ID:sessionId,FACTORY_PROJECT_ID:project,...extraEnv},encoding:'utf8'});}
+function refreshCapture(){capture();const f=path.join(state,'route-identities.json'),c=JSON.parse(fs.readFileSync(f)),at=Date.now();c.capturedAt=new Date(at-1000).toISOString();c.validUntil=new Date(at+30*60000).toISOString();write(f,c);}
+// Guards file-mtime-vs-Date.now() source-observation checks from filesystem timestamp granularity/rounding
+// when a write is immediately followed by an in-process takeSnapshot call.
+function sleepPastMtimeGranularity(){Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,50);}
+
+test('allowlist add rejects malformed ids, stores confirmedBy/source metadata, and round trips through show/remove',()=>{
+  const bad=runCli(['allowlist',project,'--add','not-a-valid-id','--source','fixtures/op.json']);assert.equal(bad.status,2);
+  const r1=runCli(['allowlist',project,'--add',key,'--source','fixtures/op.json']);assert.equal(r1.status,0,r1.stderr);
+  const list=JSON.parse(r1.stdout);assert.equal(list.length,1);assert.equal(list[0].id,key);assert.equal(list[0].confirmedBy,'user');assert.equal(list[0].source,'fixtures/op.json');assert.ok(Number.isFinite(Date.parse(list[0].confirmedAt)));
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(state,'route-policy.json'))).projects[project].allowlist,list);
+  assert.deepEqual(JSON.parse(runCli(['allowlist',project,'--show']).stdout),list);
+  assert.deepEqual(JSON.parse(runCli(['allowlist',project,'--remove',key]).stdout),[]);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(state,'route-policy.json'))).projects[project].allowlist,[]);
+});
+test('allowlist add never assigns a tier, warns for an unconfigured id, and stores shell-metacharacter metadata literally without executing it',()=>{
+  const weird='; touch pwned #';
+  const r=runCli(['allowlist',project,'--add','fixture-engine/other','--source',weird,'--confirmed-by',weird]);assert.equal(r.status,0,r.stderr);
+  assert.match(r.stderr,/not a configured model selection/);
+  const list=JSON.parse(r.stdout);assert.equal(list[0].source,weird);assert.equal(list[0].confirmedBy,weird);assert.equal(list[0].tier,undefined);
+  assert.equal(fs.existsSync(path.join(root,'pwned')),false);
+});
+test('snapshot writes a schema-2 file atomically and matches loadSnapshot for an allowlisted configured model',()=>{
+  commandSetup();const r=runCli(['snapshot',project,'--json']);assert.equal(r.status,0,r.stderr);
+  const snap=JSON.parse(r.stdout);assert.equal(snap.schema,2);assert.equal(snap.project,project);assert.ok(snap.hash);assert.deepEqual(snap.allowed,[key]);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(state,'project-provider-snapshots',project+'.json'))),snap);
+  assert.ok(!Object.keys(stateBytes()).some(p=>p.endsWith('.tmp')||p.endsWith('.lock')));
+  assert.deepEqual(loadSnapshot(project),snap);
+});
+test('snapshot with no allowlist refuses every model and warns on stderr',()=>{
+  commandSetup();const raw=JSON.parse(fs.readFileSync(path.join(state,'route-policy.json')));raw.projects[project].allowlist=[];write(path.join(state,'route-policy.json'),raw);
+  const r=runCli(['snapshot',project,'--json']);assert.equal(r.status,0,r.stderr);assert.match(r.stderr,/no allowlist/);
+  const snap=JSON.parse(r.stdout);assert.deepEqual(snap.allowed,[]);
+  const m=snap.models.find(m=>m.key===key);assert.equal(m.authorization.status,'refused');assert.ok(m.authorization.reasons.length>0);
+});
+test('a configured allowlisted model with no tier evidence surfaces a structured held question, never a fabricated tier',()=>{
+  commandSetup();const snap=takeSnapshot(project);const m=snap.models.find(m=>m.key===key);
+  assert.equal(m.hierarchy.value,'unknown');assert.equal(m.decisionState.needsUserChoice,true);
+  assert.ok(m.decisionState.options.some(o=>o.action==='defer'));
+  assert.ok(m.decisionState.options.some(o=>o.action==='record-tier'&&o.value==='worker'));
+  assert.ok(m.decisionState.options.some(o=>o.action==='record-tier'&&o.value==='premium'));
+});
+test('team-setup capture states: absent without a capture, inconsistent for an unconfigured identity, used when cross-checked, and expired past maxAgeMinutes',()=>{
+  commandSetup();sleepPastMtimeGranularity();
+  assert.equal(takeSnapshot(project).sources.teamSetup.status,'absent');
+  const consistent=JSON.stringify({instances:[{instanceId:'fixture-engine',ready:true,models:{options:[{id:'small'}]}}]});
+  assert.equal(takeSnapshot(project,{teamSetupText:consistent,teamSetupPath:'stdin'}).sources.teamSetup.status,'used');
+  const inconsistent=JSON.stringify({instances:[{instanceId:'fixture-engine',ready:true,models:{options:[{id:'ghost'}]}}]});
+  assert.equal(takeSnapshot(project,{teamSetupText:inconsistent,teamSetupPath:'stdin'}).sources.teamSetup.status,'inconsistent');
+  const past=new Date(Date.now()-3600000).toISOString();
+  assert.equal(takeSnapshot(project,{teamSetupText:consistent,teamSetupPath:'stdin',capturedAt:past}).sources.teamSetup.status,'expired');
+});
+test('snapshot --team-setup - reads the capture from stdin and cross-checks it',()=>{
+  commandSetup();const text=JSON.stringify({instances:[{instanceId:'fixture-engine',ready:true,models:{options:[{id:'small'}]}}]});
+  const r=spawnSync(process.execPath,[path.join(__dirname,'factory-route.cjs'),'snapshot',project,'--team-setup','-','--json'],{input:text,env:{...process.env,FACTORY_SESSION_ID:sessionId,FACTORY_PROJECT_ID:project},encoding:'utf8'});
+  assert.equal(r.status,0,r.stderr);assert.equal(JSON.parse(r.stdout).sources.teamSetup.status,'used');
+});
+test('snapshot --captured-at in the future is rejected, both at the CLI layer and inside takeSnapshot, without writing a snapshot file',()=>{
+  commandSetup();
+  assert.equal(runCli(['snapshot',project,'--team-setup','-','--captured-at','not-a-date']).status,2);
+  const text=JSON.stringify({instances:[{instanceId:'fixture-engine',ready:true,models:{options:[{id:'small'}]}}]});
+  const file=path.join(root,'team-setup.json');write(file,text);const future=new Date(Date.now()+3600000).toISOString();
+  const before=stateBytes();const r=runCli(['snapshot',project,'--team-setup',file,'--captured-at',future]);
+  assert.equal(r.status,2,r.stderr);assert.match(r.stderr,/invalid\/future/);assert.deepEqual(stateBytes(),before);
+  assert.throws(()=>takeSnapshot(project,{teamSetupText:text,teamSetupPath:'stdin',capturedAt:future}),/invalid\/future/);
+});
+test('snapshot --evidence rejects invalid evidence atomically, without writing a snapshot or partial evidence state',()=>{
+  commandSetup();const bad=evidence();bad.records[0].value='yes';const file=path.join(root,'evidence.json');write(file,bad);
+  const before=stateBytes();const r=runCli(['snapshot',project,'--evidence',file]);
+  assert.equal(r.status,2,r.stderr);assert.deepEqual(stateBytes(),before);
+  assert.equal(fs.existsSync(path.join(state,'project-provider-snapshots',project+'.json')),false);
+});
+test('same catalog content refresh does not change the catalog fingerprint; a substantive capability change does',()=>{
+  commandSetup();sleepPastMtimeGranularity();const a=takeSnapshot(project),engineA=a.engines.find(e=>e.id==='fixture-engine');
+  write(path.join(home,'providers/engine-models/fixture-engine.json'),{default:'small',options:[{id:'small',label:'Small',contextWindow:32000}]});refreshCapture();sleepPastMtimeGranularity();
+  const b=takeSnapshot(project),engineB=b.engines.find(e=>e.id==='fixture-engine');
+  assert.equal(engineA.catalogFingerprint,engineB.catalogFingerprint);assert.equal(engineA.rawCatalogFingerprint,engineB.rawCatalogFingerprint);
+  write(path.join(home,'providers/engine-models/fixture-engine.json'),{default:'small',options:[{id:'small',label:'Small',contextWindow:64000}]});refreshCapture();sleepPastMtimeGranularity();
+  const c=takeSnapshot(project),engineC=c.engines.find(e=>e.id==='fixture-engine');
+  assert.notEqual(engineA.catalogFingerprint,engineC.catalogFingerprint);
+});
