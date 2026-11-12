@@ -141,6 +141,32 @@ test('snapshot --evidence rejects invalid evidence atomically, without writing a
   assert.equal(r.status,2,r.stderr);assert.deepEqual(stateBytes(),before);
   assert.equal(fs.existsSync(path.join(state,'project-provider-snapshots',project+'.json')),false);
 });
+test('snapshot held exit8 for missing route-identities.json, without writing a snapshot file',()=>{
+  commandSetup();fs.unlinkSync(path.join(state,'route-identities.json'));
+  const before=stateBytes();const r=runCli(['snapshot',project,'--json']);
+  assert.equal(r.status,8,r.stderr);assert.deepEqual(stateBytes(),before);
+  assert.equal(fs.existsSync(path.join(state,'project-provider-snapshots',project+'.json')),false);
+});
+test('snapshot held exit8 for a stale/expired attestation, without writing a snapshot file',()=>{
+  commandSetup();const f=path.join(state,'route-identities.json'),c=JSON.parse(fs.readFileSync(f));
+  c.validUntil=new Date(Date.now()-1000).toISOString();write(f,c);
+  const before=stateBytes();const r=runCli(['snapshot',project,'--json']);
+  assert.equal(r.status,8,r.stderr);assert.deepEqual(stateBytes(),before);
+});
+test('snapshot held exit8 for a wrong-session or wrong-native-binding attestation, without writing a snapshot file',()=>{
+  commandSetup();
+  const beforeSession=stateBytes(),rSession=runCli(['snapshot',project,'--json'],{FACTORY_SESSION_ID:'other'});
+  assert.equal(rSession.status,8,rSession.stderr);assert.deepEqual(stateBytes(),beforeSession);
+  const f=path.join(state,'route-identities.json'),c=JSON.parse(fs.readFileSync(f));
+  c.nativeFingerprint='0'.repeat(64);write(f,c);
+  const beforeBinding=stateBytes(),rBinding=runCli(['snapshot',project,'--json']);
+  assert.equal(rBinding.status,8,rBinding.stderr);assert.deepEqual(stateBytes(),beforeBinding);
+});
+test('snapshot still exits2 for genuinely malformed input, unaffected by the identity-hold exit8 path',()=>{
+  commandSetup();
+  assert.equal(runCli(['snapshot',project,'--captured-at','not-a-date']).status,2);
+  assert.equal(runCli(['snapshot','not valid id']).status,2);
+});
 test('same catalog content refresh does not change the catalog fingerprint; a substantive capability change does',()=>{
   commandSetup();sleepPastMtimeGranularity();const a=takeSnapshot(project),engineA=a.engines.find(e=>e.id==='fixture-engine');
   write(path.join(home,'providers/engine-models/fixture-engine.json'),{default:'small',options:[{id:'small',label:'Small',contextWindow:32000}]});refreshCapture();sleepPastMtimeGranularity();

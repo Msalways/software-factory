@@ -577,6 +577,16 @@ function recordProviderInput(command,project,file) {
   return {schema:1,command,project,recorded:true,attestationOnly:true,cleanupPending};
 }
 
+// Missing/stale/wrong-session/wrong-native-binding route-identity attestation holds snapshot (exit8, PRD v2.2);
+// distinct from malformed/invalid input (exit2) and from an unrelated source changing mid-read.
+const IDENTITY_HOLD_PATTERNS = [
+  /^required source missing: .*route-identities\.json$/,
+  /^identity session\/native binding mismatch$/,
+  /^identity capture expired\/invalid$/,
+  /^expired capture$/,
+];
+const isIdentityHold = message => IDENTITY_HOLD_PATTERNS.some(p => p.test(message));
+
 // ---------- CLI
 if (require.main === module) {
   const a = process.argv.slice(2);
@@ -636,7 +646,13 @@ if (require.main === module) {
       if (a.length || (hasCapture && captureFile === undefined) || (hasCapturedAt && explicitAt === undefined) || (hasEvidence && evidenceFile === undefined) ||
         (explicitAt !== undefined && !Number.isFinite(Date.parse(explicitAt)))) throw Error('usage: snapshot <project> [--team-setup file|-] [--captured-at ISO] [--evidence file]');
       const teamSetupText = captureFile === undefined ? null : readIn(captureFile);
-      const snap = takeSnapshot(project, {teamSetupText, teamSetupPath: captureFile === '-' ? 'stdin' : captureFile ?? null, capturedAt: explicitAt ?? null, evidenceFile: evidenceFile ?? null});
+      let snap;
+      try {
+        snap = takeSnapshot(project, {teamSetupText, teamSetupPath: captureFile === '-' ? 'stdin' : captureFile ?? null, capturedAt: explicitAt ?? null, evidenceFile: evidenceFile ?? null});
+      } catch (e) {
+        if (isIdentityHold(e.message)) { console.error(e.message); process.exit(8); }
+        throw e;
+      }
       if (!allowlistIds(readPolicy(), project).length) console.error(`warning: no allowlist for ${project}; every model is refused until the user confirms one (allowlist --add)`);
       if (json) console.log(JSON.stringify(snap, null, 2));
       else {
