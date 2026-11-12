@@ -28,3 +28,12 @@ test('config bots and catalog preimages match independent native projections',()
 test('malformed native selections never become a synthetic undefined model',()=>{write(path.join(home,'config.json'),{instances:{'fixture-engine':{driver:'fixture-driver'}},defaultModelSelection:{instanceId:'fixture-engine'}});assert.throws(read);});
 test('null/array project collection fails closed',()=>{write(path.join(state,'route-policy.json'),{projects:[]});assert.throws(read);});
 test('present JSON null is corruption, never a missing optional source',()=>{for(const name of ['route-policy.json','provider-evidence.json','opencode-discovery.json']){write(path.join(state,name),'null');assert.throws(read,name);fs.unlinkSync(path.join(state,name));}});
+for(const [name,lastKeys,generations] of [
+ ['foreign engine lastKey',['foreign/ghost'],{[key]:0}],
+ ['own engine missing generation',[key,'fixture-engine/missing'],{[key]:0}],
+ ['negative generation',[key],{[key]:-1}],
+ ['fractional generation',[key],{[key]:0.5}],
+ ['duplicate lastKeys',[key,key],{[key]:0}],
+ ['foreign generation key',[key],{[key]:0,'foreign/ghost':1}],
+])test('history fails closed for '+name+' without writes',()=>{const h={schema:1,engines:{'fixture-engine':{lastKeys,retirementGeneration:generations}}};write(path.join(state,'project-catalog-history',project+'.json'),h);const before=bytes();assert.throws(read,/history|generation|identity/);assert.deepEqual(bytes(),before);});
+test('valid complete current and tombstone history is retained without mutation',()=>{const h={schema:1,engines:{'fixture-engine':{lastKeys:[key],retirementGeneration:{[key]:3,'fixture-engine/retired':2},retained:{note:'retain unrelated history metadata'}}}};const f=path.join(state,'project-catalog-history',project+'.json');write(f,h);const before=bytes(),s=read();assert.deepEqual(s.inputs.history,h);assert.deepEqual(s.preimages.history.source.value,h);assert.deepEqual(bytes(),before);assert.equal(s.revalidate(time),true);});
