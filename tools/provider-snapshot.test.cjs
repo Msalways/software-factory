@@ -129,3 +129,7 @@ test('precise claim projection excludes capture paths, observation and binding h
   const r=resolve(a);assert.equal(r.modelFingerprint,fingerprint({model:raw,claims:[claim]}));
   assert.equal(r.catalogFingerprint,fingerprint({engine:{id:'engine-x',driver:'synthetic'},models:[{key,modelFingerprint:r.modelFingerprint}],claims:[claim],retirementGenerations:{[key]:0}}));
 });
+test('conflicting native hierarchy values cannot be hidden by equal normalized tiers',()=>{
+  const a=input();add(a,'tier',{nativeTier:'standard',normalized:'worker'});add(a,'tier',{nativeTier:'economy',normalized:'worker'});
+  const r=resolve(a);assert.equal(r.hierarchy.value,'unknown');assert.match(r.hierarchy.reasons.join(),/conflicting/);
+});

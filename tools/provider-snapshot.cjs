@@ -125,7 +125,8 @@ function resolveModelEvidence(input) {
     const records=recordsForTarget.filter(r => r.field === field), excluded=[], accepted=[];
     for(const r of records){const reasons=exclusions(r,field);if(reasons.length)excluded.push({sourceRef:r.sourceRef,reasons});else accepted.push(r);}
     const values=accepted.map(r => field === 'tier' ? r.value.normalized : field === 'price' ? {input:null,output:null,cachedInput:null,contextBand:null,serviceTier:null,...r.value} : r.value);
-    const conflict=new Set(values.map(canonicalRecord)).size>1, known=accepted.length>0&&!conflict;
+    const agreementValues=field==='tier'?accepted.map(r=>r.value):values;
+    const conflict=new Set(agreementValues.map(canonicalRecord)).size>1, known=accepted.length>0&&!conflict;
     return {value:known?values[0]:field==='tier'?'unknown':null,sourceRefs:records.map(r=>r.sourceRef).sort(),
       observedAt:known?accepted.reduce((a,b)=>Date.parse(a.observedAt)>Date.parse(b.observedAt)?a:b).observedAt:null,confidence:known?'high':'low',status:known?'observed':'unverified',
       reasons:known?[]:[conflict?'conflicting provider evidence':'no applicable provider evidence'],excluded};
