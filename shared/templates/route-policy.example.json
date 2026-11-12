@@ -1,17 +1,28 @@
 {
-  "_about": "Owner-edited routing data. Assign tiers only to authorized configured model identities observed in engine output; catalogs alone never authorize execution. Missing cost and capability observations stay unknown. Empty tiers require an explicit fallback receipt.",
+  "_about": "Project authorization, provider tier evidence, task capability and dispatch/cost permission are independent. Qualified workers first for every work kind; premium requires documented need plus exact per-slice user permission. Unknown choices remain held.",
   "engines": {},
   "models": {},
-  "workKindTiers": {
-    "orchestrate": "premium",
-    "plan": "premium",
-    "review": "premium",
-    "explain": "premium",
-    "implement": "worker",
-    "routine-verify": "worker"
+  "_legacy": "Empty engine/model data is advisory compatibility only. It is not project tier evidence, authorization, a premium assignment or cost permission. No mandatory workKindTiers mapping.",
+  "projects": {},
+  "_projectTemplate": {
+    "allowlist": [],
+    "modelDecisions": {},
+    "premiumApprovals": {},
+    "opencodePreference": {
+      "chosen": [],
+      "offered": []
+    }
   },
-  "_modelTierSchema": "models[engine/model].tier is an owner-declared tier; no model identities are preassigned. A worker pilot requires owner authorization first.",
-  "openCodeWorkerModels": [],
-  "opencodePreference": {"chosen": [], "askedAt": null, "offered": []},
-  "_openCodeWorkerModels": "Leave empty until initial owner preference selection (slice 02b). Neither this list nor a tier declaration authorizes a model."
+  "_allowlistSchema": "projects[p].allowlist: [{id,confirmedBy,confirmedAt,source}]. Actual user confirmation only; still intersect configured/catalog/readiness gates. Does not assign tier or spend.",
+  "_modelDecisionsSchema": "projects[p].modelDecisions[key]: {tier,preferenceRank:null|nonnegativeInteger,confirmedBy:'user',confirmedAt,sourceRef,modelFingerprint,catalogFingerprint,retirementGeneration,scope:'model|catalog'}. Actual answer only; classification never authorizes a model. Catalog-scoped ordering binds the resolved catalog/lifecycle hash.",
+  "_premiumApprovalsSchema": "projects[p].premiumApprovals[slice]: {keys,profileHash,approvedBy:'user',approvedAt,expiresAt,sourceRef}. Requires premiumNeed {requirementIds,reason,cheaperRejected:[{key,reason,evidenceRef}]} and exact current task/key/time matching. No default approval.",
+  "_opencodePreferenceSchema": "projects[p].opencodePreference: {chosen:[],offered:[],askedAt,confirmedBy:'user',sourceRef,catalogFingerprint,scope:'catalog'}. Exact engine/model keys, local metadata only, resolved catalog binding; no tier/authorization from preference or legacy global preference.",
+  "snapshot": {
+    "maxAgeMinutes": 60,
+    "catalogStaleHours": 24
+  },
+  "_snapshot": "Schema 2 requires canonical hash, valid time/earliest evidence expiry and unchanged config,bots,catalogs,policy,evidence,decisions,history,limits,opencode fingerprints. Stale catalog requires a valid current-session readiness capture; capture is an attestation, not permission.",
+  "_evidence": "<STATE>/provider-evidence.json holds {schema:1,records:[]}; local sanitized sourceRef or official HTTPS source, exact provider/account identity and validity. Evidence.catalogFingerprint binds raw catalog; decisions/preferences bind resolved hashes/generation. No automatic rebinding or tier inference from names/effort/price. Import via evidence-import; this comment is not an executable policy path setting.",
+  "knownExceptions": [],
+  "_knownExceptions": "[{instanceId,threadPrefix?,model?,reason}] declares platform-internal audit exceptions only, never authorization, tier or dispatch permission."
 }

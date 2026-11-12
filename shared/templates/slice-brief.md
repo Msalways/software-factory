@@ -7,8 +7,10 @@
 <Exact authorized repository/worktree path, baseline SHA, branch, and worker thread.>
 
 ## Mentor and worker route
-<Mentor thread/bot identity; workKind; requested tier and confirmed route receipt.
-Do not put fixed model identities here. Use owner policy and current authorization.>
+<Mentor thread/bot identity; exact task profile/profileHash and schema-2 snapshot path/hash/freshness evidence; routing receipt and sourceRefs.
+Separate authorization, provider tier evidence, hard capabilities and dispatch/cost permission; qualified worker first for every work kind, never a fixed tier by role.
+Record requested engine/model/effort separately from provider-acknowledged actual identity/effort and its source; unavailable means unconfirmed.
+List held questions and any exact premium need/user permission binding. Two failures justify asking only; timeout grants nothing. No fixed model identities or inferred approval.>
 
 ## Expected change surface
 <Exact files/directories expected to change and why each is needed.>
