@@ -1,6 +1,6 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {fingerprint,resolveModelEvidence:resolve} = require('./provider-snapshot.cjs');
+const {fingerprint,resolveModelEvidence:resolve,buildSnapshot,isFresh,decide,evaluateTask,REASONS} = require('./provider-snapshot.cjs');
 const copy = v => JSON.parse(JSON.stringify(v));
 const key='engine-x/vendor/model-a', scope='account-x/api', now=Date.parse('2026-11-12T09:00:00Z');
 function input(){
@@ -168,4 +168,126 @@ test('valid current-catalog preference remains resolved while duplicate/not-offe
   for(const [chosen,offered,reason] of [
     [[key,key],[key],/duplicate preference keys/],[[key],[key,key],/duplicate preference keys/],[[key],[],/chosen key not offered/],
   ]){const b=copy(a);b.preference.chosen=chosen;b.preference.offered=offered;const invalid=resolve(b);assert.equal(invalid.decisionState.needsUserChoice,true);assert.match(invalid.decisionState.reasons.join(),reason);}
+});
+
+const sourceNames=['config','bots','catalogs','policy','evidence','decisions','history','limits','opencode'];
+function assembly(){
+  const a=input();return {project:'demo',now,maxAgeMinutes:60,catalogStaleHours:24,
+    supply:{engines:[{id:a.engine.id,driver:a.engine.driver,catalogAt:new Date(now).toISOString(),options:a.engine.options,models:[{id:a.modelOption.id,inCatalog:true,usage:null}]}]},
+    configured:[key],allowlist:[key],teamSetup:null,opencode:{},policy:{},sources:{},evidence:[],decisions:{},preference:null,
+    routeScopes:a.engine.modelRoutes,activeLimits:[],retired:{[key]:{isRetired:false,retirementGeneration:0}},
+    currentFingerprints:Object.fromEntries(sourceNames.map(n=>[n,fingerprint(n)]))};
+}
+function populated(tier='worker'){
+  const a=assembly(),r=input();
+  add(r,'tier',{nativeTier:'explicit-provider-level',normalized:tier});add(r,'toolUse',true);add(r,'contextTokens',64000);
+  add(r,'price',{currency:'USD',unit:'token',input:1,output:2,basis:'account'});a.evidence=r.engine.evidence;return a;
+}
+const profile=()=>({slice:'slice-1',workKind:'implement',complexity:'low',budget:'free-first',needs:{toolUse:true,imageInput:false,contextTokens:32000}});
+const evaluate=(s,p=profile(),extra={})=>evaluateTask(s,key,p,{now,outcomes:[],limits:[],approval:null,...extra});
+test('schema2 full catalog and authorization remain independent of tier and task eligibility',()=>{
+  const a=assembly(),before=copy(a),s=buildSnapshot(a);assert.deepEqual(a,before);assert.equal(s.schema,2);assert.match(s.hash,/^[a-f0-9]{64}$/);
+  assert.deepEqual(s.allowed,[key]);assert.equal(s.models[0].hierarchy.value,'unknown');assert.equal(evaluate(s).decision,'held');
+  assert.deepEqual(decide(s,key),{decision:'allowed',reasons:[]});assert.equal(s.catalogModelsOmitted,0);
+  assert.deepEqual(s.engines[0].options,a.supply.engines[0].options);assert.deepEqual(s.engines[0].modelRoutes,a.routeScopes);assert.deepEqual(s.retired,a.retired);assert.equal(s.engines[0].retirementGenerations[key],0);
+});
+test('every ordered v1 authorization refusal is retained',()=>{
+  let a=assembly();a.allowlist=[];assert.deepEqual(buildSnapshot(a).models[0].authorization.reasons,[REASONS.allowlist]);
+  a=assembly();a.configured=[];assert.deepEqual(buildSnapshot(a).models[0].authorization.reasons,[REASONS.configured]);
+  a=assembly();a.supply.engines[0].models[0].inCatalog=false;assert.ok(buildSnapshot(a).models[0].authorization.reasons.includes(REASONS.withdrawn));
+  a=assembly();a.supply.engines[0].catalogAt=null;assert.ok(buildSnapshot(a).models[0].authorization.reasons.includes(REASONS.noCatalog));
+  a=assembly();a.supply.engines[0].catalogAt=new Date(now-48*3600000).toISOString();assert.ok(buildSnapshot(a).models[0].authorization.reasons.includes(REASONS.staleNoLive));
+  a=assembly();a.teamSetup={capturedAt:new Date(now).toISOString(),data:{instances:[]}};assert.ok(buildSnapshot(a).models[0].authorization.reasons.includes(REASONS.notReady));
+  a=assembly();a.teamSetup={capturedAt:new Date(now).toISOString(),data:{instances:[{instanceId:'engine-x',ready:true,models:{options:[]}}]}};assert.ok(buildSnapshot(a).models[0].authorization.reasons.includes(REASONS.notListed));
+  a=assembly();a.supply.engines[0].driver='opencodeGo';assert.ok(buildSnapshot(a).models[0].authorization.reasons.includes(REASONS.opencode));
+});
+test('stale catalog requires used capture; inconsistent and expired captures never widen authorization',()=>{
+  const a=assembly();a.supply.engines[0].catalogAt=new Date(now-48*3600000).toISOString();
+  a.teamSetup={capturedAt:new Date(now).toISOString(),data:{instances:[{instanceId:'engine-x',ready:true,effortLevels:['explicit-effort'],models:{options:[{id:'vendor/model-a'}]}}]}};
+  let s=buildSnapshot(a);assert.deepEqual(s.allowed,[key]);assert.ok(s.models[0].authorization.flags.includes('catalog stale'));
+  a.teamSetup.capturedAt=new Date(now-61*60000).toISOString();s=buildSnapshot(a);assert.equal(s.sources.teamSetup.status,'expired');assert.deepEqual(s.allowed,[]);
+  a.teamSetup.capturedAt=new Date(now).toISOString();a.teamSetup.data.instances[0].models.options=[{id:'unconfigured'}];s=buildSnapshot(a);assert.equal(s.sources.teamSetup.status,'inconsistent');assert.deepEqual(s.allowed,[]);
+});
+test('invalid/future capture and catalog times fail, while future ordered evidence expiry is accepted',()=>{
+  for(const stamp of ['invalid',new Date(now+1).toISOString()]){const a=assembly();a.teamSetup={capturedAt:stamp,data:{instances:[]}};assert.throws(()=>buildSnapshot(a));}
+  const a=assembly();a.supply.engines[0].catalogAt=new Date(now+1).toISOString();assert.throws(()=>buildSnapshot(a));assert.doesNotThrow(()=>buildSnapshot(populated()));
+});
+test('freshness rejects schema1, tampering, source changes, future snapshots and expired evidence',()=>{
+  const a=populated(),s=buildSnapshot(a),expiry=Date.parse(s.expiresAt);assert.equal(isFresh(s,expiry,a.currentFingerprints),true);assert.equal(isFresh(s,expiry+1,a.currentFingerprints),false);
+  assert.equal(isFresh({...s,schema:1},now,a.currentFingerprints),false);assert.equal(isFresh({...s,allowed:[]},now,a.currentFingerprints),false);
+  assert.equal(isFresh(s,now,{...a.currentFingerprints,config:fingerprint('changed')}),false);assert.equal(isFresh(s,now-1,a.currentFingerprints),false);
+  a.evidence[0].validUntil=new Date(now+1000).toISOString();const short=buildSnapshot(a);assert.equal(Date.parse(short.expiresAt),now+1000);assert.equal(isFresh(short,now+1001,a.currentFingerprints),false);
+});
+test('full catalog research includes unauthorized models but suppresses their questions and preserves complete options',()=>{
+  const a=assembly(),other='engine-x/extra';a.supply.engines[0].options.push({id:'extra',nested:{value:1}});a.supply.engines[0].models.push({id:'extra',inCatalog:true,usage:null});a.routeScopes[other]={providerId:'provider-x',routeScope:scope};a.retired[other]={isRetired:false,retirementGeneration:0};
+  const s=buildSnapshot(a);assert.equal(s.models.length,2);assert.deepEqual(s.allowed,[key]);const extra=s.models.find(m=>m.key===other);assert.equal(extra.decisionState.needsUserChoice,false);assert.deepEqual(extra.decisionState.options,[]);assert.ok(extra.modelFingerprint);
+});
+test('missing historical option/route yields explicit unknown fingerprint and withdrawal refusal',()=>{
+  const a=assembly();a.supply.engines[0].options=[];a.supply.engines[0].models[0].inCatalog=false;a.retired[key]={isRetired:true,retirementGeneration:1};
+  const s=buildSnapshot(a);assert.equal(s.models[0].modelFingerprint,null);assert.ok(s.models[0].authorization.reasons.includes(REASONS.withdrawn));assert.deepEqual(s.allowed,[]);
+});
+test('known worker passes without unused image evidence; true image need unknown holds and known false refuses',()=>{
+  const a=populated(),s=buildSnapshot(a);assert.equal(evaluate(s).decision,'allowed');
+  const p=profile();p.needs.imageInput=true;assert.equal(evaluate(s,p).decision,'held');
+  const e=input();for(const r of a.evidence){e.engine.evidence.push(r);e.evidence.push(r);}add(e,'imageInput',false);a.evidence=e.evidence;
+  assert.equal(evaluate(buildSnapshot(a),p).decision,'refused');
+});
+test('authorization and active account/model limits take refusal precedence over unknown facts',()=>{
+  const a=assembly();a.allowlist=[];assert.equal(evaluate(buildSnapshot(a)).decision,'refused');
+  const s=buildSnapshot(assembly());const limit={engine:'engine-x',scope:'engine',model:'unrelated',resetAt:new Date(now+1000).toISOString()};
+  const r=evaluate(s,profile(),{limits:[limit]});assert.equal(r.decision,'refused');assert.match(r.reasons.join(),/active account/);
+  assert.notEqual(evaluate(s,profile(),{limits:[{...limit,scope:'model'}]}).decision,'refused');
+});
+test('known hard incapability refuses and unknown required tool/context holds',()=>{
+  const a=assembly();assert.equal(evaluate(buildSnapshot(a)).decision,'held');
+  const b=populated();b.evidence.find(e=>e.field==='toolUse').value=false;assert.equal(evaluate(buildSnapshot(b)).decision,'refused');
+  const c=populated();c.evidence.find(e=>e.field==='contextTokens').value=100;assert.equal(evaluate(buildSnapshot(c)).decision,'refused');
+});
+test('medium/high unproven outcomes hold; applicable measured success passes; failures refuse',()=>{
+  const s=buildSnapshot(populated()),p={...profile(),complexity:'medium'};assert.equal(evaluate(s,p).decision,'held');
+  const outcomes=[1,2].map(()=>({engine:'engine-x',model:'vendor/model-a',complexity:'medium',result:'ok'}));assert.equal(evaluate(s,p,{outcomes}).decision,'allowed');
+  outcomes.forEach(o=>o.result='broken');assert.equal(evaluate(s,p,{outcomes}).decision,'refused');
+});
+function premiumProfile(){return {...profile(),premiumNeed:{requirementIds:['R-test'],reason:'Specific requirement unsupported by cheaper worker',cheaperRejected:[{key:'other/worker',reason:'required tool absent',evidenceRef:'fixtures/worker.json'}]}};}
+function approval(p){return {keys:[key],profileHash:fingerprint(p),approvedBy:'user',approvedAt:new Date(now-1000).toISOString(),expiresAt:new Date(now+1000).toISOString(),sourceRef:'fixtures/permission.json'};}
+test('premium requires both evidenced need and exact current user approval',()=>{
+  const s=buildSnapshot(populated('premium')),p=premiumProfile();assert.equal(evaluate(s).decision,'refused');assert.equal(evaluate(s,p).decision,'refused');
+  const r=evaluate(s,p,{approval:approval(p)});assert.equal(r.decision,'allowed');assert.ok(r.premiumJustification);
+  const bad=premiumProfile();bad.premiumNeed.cheaperRejected=[];assert.equal(evaluate(s,bad,{approval:approval(bad)}).decision,'refused');
+});
+test('expired/future/wrong-profile/wrong-key/nonuser premium approvals refuse',()=>{
+  const s=buildSnapshot(populated('premium')),p=premiumProfile();
+  for(const patch of [{expiresAt:new Date(now-1).toISOString()},{approvedAt:new Date(now+1).toISOString()},{profileHash:fingerprint('wrong')},{keys:['other/key']},{approvedBy:'bot'}])assert.equal(evaluate(s,p,{approval:{...approval(p),...patch}}).decision,'refused');
+  const changed={...p,needs:{...p.needs,contextTokens:33000}};assert.equal(evaluate(s,changed,{approval:approval(p)}).decision,'refused');
+});
+test('role, effort and failure count never promote worker or authorize premium',()=>{
+  const p={...profile(),workKind:'plan',role:'orchestrator',effort:'high',failureCount:2};assert.equal(evaluate(buildSnapshot(populated()),p).decision,'allowed');
+  assert.equal(evaluate(buildSnapshot(populated('premium')),p).decision,'refused');assert.equal(evaluateTask(buildSnapshot(populated()),'../escape',p,{now}).decision,'refused');
+});
+test('OpenCode current project preference gates authorization without supplying tier or new identities',()=>{
+  const a=assembly();a.supply.engines[0].driver='opencodeGo';let s=buildSnapshot(a);assert.deepEqual(s.allowed,[]);
+  a.preference={chosen:[key],offered:[key],askedAt:new Date(now-1000).toISOString(),confirmedBy:'user',sourceRef:'fixtures/answer.json',catalogFingerprint:s.engines[0].catalogFingerprint,scope:'catalog'};
+  s=buildSnapshot(a);assert.deepEqual(s.allowed,[key]);assert.equal(s.models[0].hierarchy.value,'unknown');assert.equal(evaluate(s).decision,'held');
+});
+test('evidence is invalid at its validity endpoint while ordinary snapshot expiry remains inclusive',()=>{
+  const a=populated();a.evidence.find(e=>e.field==='price').validUntil=new Date(now+1000).toISOString();
+  const s=buildSnapshot(a);assert.equal(isFresh(s,now+999,a.currentFingerprints),true);assert.equal(isFresh(s,now+1000,a.currentFingerprints),false);
+  a.now=now+1001;const fresh=buildSnapshot(a);assert.equal(fresh.models[0].priceEvidence.value,null);
+  assert.equal(evaluate(fresh,profile(),{now:a.now}).decision,'held');
+});
+test('all current source changes invalidate; evaluator can consume the independent current map',()=>{
+  const a=populated(),s=buildSnapshot(a);
+  for(const field of sourceNames){const changed={...a.currentFingerprints,[field]:fingerprint('new '+field)};assert.equal(isFresh(s,now,changed),false);assert.equal(evaluate(s,profile(),{currentFingerprints:changed}).decision,'refused');}
+  assert.equal(isFresh(s,now,{}),false);
+});
+test('malformed retained history, missing raw options, future provenance and malformed profiles reject safely',()=>{
+  for(const change of [a=>a.retired[key].retirementGeneration=-1,a=>a.retired[key].isRetired=true,a=>delete a.supply.engines[0].options,a=>a.sources.config={mtime:new Date(now+1).toISOString()}]){const a=assembly();change(a);assert.throws(()=>buildSnapshot(a));}
+  const s=buildSnapshot(populated());assert.equal(evaluate(s,{...profile(),estimatedTokens:{input:-1,output:1,cachedInput:0}}).decision,'refused');
+  assert.equal(evaluate(s,{...profile(),needs:{toolUse:true}}).decision,'refused');
+});
+test('unproven medium task needs exact explicit acceptance and does not gain premium permission',()=>{
+  const p={...profile(),complexity:'medium'},s=buildSnapshot(populated());
+  assert.equal(evaluate(s,p,{unprovenAcceptance:approval(p)}).decision,'allowed');
+  assert.equal(evaluate(s,p,{unprovenAcceptance:{...approval(p),profileHash:fingerprint('other')}}).decision,'held');
+  assert.equal(evaluate(buildSnapshot(populated('premium')),p,{unprovenAcceptance:approval(p)}).decision,'refused');
 });

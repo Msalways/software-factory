@@ -174,4 +174,167 @@ function resolveModelEvidence(input) {
       preferenceRank:decision&&!decisionReasons.length&&!rankReasons.length&&decision.scope==='catalog'?decision.preferenceRank:null}};
 }
 function canonicalRecord(value) { return canonical(value); }
-module.exports = {fingerprint, resolveModelEvidence};
+const REASONS = {
+  allowlist:'not in project allowlist',configured:'not a configured model selection',
+  withdrawn:'no longer in engine catalog',noCatalog:'no catalog for engine',
+  notReady:'engine not ready (list_team_setup)',notListed:'not listed by live list_team_setup',
+  staleNoLive:'catalog stale and no live readiness capture',opencode:'OpenCode preference missing or not chosen',
+};
+const sourceKeys=['config','bots','catalogs','policy','evidence','decisions','history','limits','opencode'];
+function observation(value, now, label) {
+  const at=typeof value==='string'?Date.parse(value):NaN;
+  requireThat(Number.isFinite(at)&&at<=now,`invalid/future ${label}`);return at;
+}
+function sourceMap(map) { requireThat(map&&sourceKeys.every(k=>hashString(map[k]))&&Object.keys(map).length===sourceKeys.length,'complete current source fingerprints required'); }
+function unknownModel() {
+  const unknown=()=>({value:null,sourceRefs:[],observedAt:null,confidence:'low',status:'unverified',reasons:['complete historical option/route unavailable'],excluded:[]});
+  return {modelFingerprint:null,hierarchy:{...unknown(),value:'unknown'},priceEvidence:unknown(),capabilities:{toolUse:unknown(),imageInput:unknown(),contextTokens:unknown()},decisionState:{needsUserChoice:true,reasons:['model evidence unavailable'],options:[{action:'defer'}]}};
+}
+function buildSnapshot(args) {
+  canonical(args);
+  const {project,now,maxAgeMinutes,catalogStaleHours,supply,configured,allowlist,teamSetup,opencode,policy,sources,
+    evidence,decisions,preference,routeScopes,activeLimits,retired,currentFingerprints}=args;
+  requireThat(nonempty(project)&&/^[\w.-]+$/.test(project)&&!forbidden.has(project)&&project!=='.'&&project!=='..','invalid project identity');
+  requireThat(Number.isFinite(now)&&Number.isFinite(new Date(now).getTime())&&Number.isFinite(maxAgeMinutes)&&maxAgeMinutes>0&&Number.isFinite(catalogStaleHours)&&catalogStaleHours>0,'invalid snapshot time/settings');
+  requireThat(supply&&Array.isArray(supply.engines)&&Array.isArray(configured)&&Array.isArray(allowlist)&&Array.isArray(evidence)&&Array.isArray(activeLimits),'snapshot collections required');
+  requireThat(decisions&&routeScopes&&retired&&policy&&sources&&opencode,'snapshot maps required');sourceMap(currentFingerprints);
+  for(const [k,state] of Object.entries(retired)){
+    identity(k);requireThat(state&&typeof state.isRetired==='boolean'&&Number.isSafeInteger(state.retirementGeneration)&&state.retirementGeneration>=0&&(!state.isRetired||state.retirementGeneration>0),'invalid retained retirement history');
+    if(state.modelOption!==undefined)requireThat(state.modelOption&&identity(k)+'/'+state.modelOption.id===k,'historical option identity mismatch');
+  }
+  for(const [k,route] of Object.entries(routeScopes)){identity(k);requireThat(Object.hasOwn(retired,k)&&route&&nonempty(route.providerId)&&nonempty(route.routeScope),'route lacks retained history/identity');}
+  for(const source of Object.values(sources))if(source&&typeof source==='object')for(const field of ['mtime','observedAt','capturedAt'])if(source[field]!=null)observation(source[field],now,'source observation');
+  const configuredSet=new Set(configured),allowedSet=new Set(allowlist);for(const k of [...configured,...allowlist])identity(k);
+  let captureStatus='absent',detail='no live readiness capture',captureAt=null,instances=[];
+  const options=i=>Array.isArray(i?.models?.options)?i.models.options:[];
+  if(teamSetup!==null){
+    captureAt=observation(teamSetup.capturedAt,now,'capture time');
+    if(!teamSetup.data||!Array.isArray(teamSetup.data.instances)){captureStatus='inconsistent';detail='capture requires instances array';}
+    else {
+      const list=teamSetup.data.instances,ids=new Set();let inconsistent=false;
+      for(const i of list){requireThat(i&&nonempty(i.instanceId)&&!ids.has(i.instanceId),'duplicate/invalid capture engine');ids.add(i.instanceId);
+        for(const o of options(i)){const k=i.instanceId+'/'+o.id;identity(k);if(!configuredSet.has(k))inconsistent=true;}}
+      if(inconsistent){captureStatus='inconsistent';detail='capture lists unconfigured identity';}
+      else if(now-captureAt>maxAgeMinutes*60000){captureStatus='expired';detail='capture too old';}
+      else{captureStatus='used';detail='configured identities cross-checked';instances=list;}
+    }
+  }
+  const used=captureStatus==='used',live=new Set(instances.flatMap(i=>options(i).map(o=>i.instanceId+'/'+o.id)));
+  const engineIds=new Set(),engines=[],internals=new Map(),universe=new Set([...allowlist,...configured,...live]);
+  let expiry=now+maxAgeMinutes*60000,evidenceExpiry=null;if(used)expiry=Math.min(expiry,captureAt+maxAgeMinutes*60000);
+  for(const e of supply.engines){
+    requireThat(e&&nonempty(e.id)&&!engineIds.has(e.id)&&Array.isArray(e.options)&&Array.isArray(e.models),'complete engine options/observations required');engineIds.add(e.id);
+    if(e.catalogAt!==null)observation(e.catalogAt,now,'catalog observation');
+    const currentKeys=e.options.map(o=>e.id+'/'+o.id),history=Object.fromEntries(Object.entries(retired).filter(([k])=>identity(k)===e.id).map(([k,v])=>[k,v.retirementGeneration]));
+    if(e.catalogAt!==null)for(const k of Object.keys(history))requireThat(retired[k].isRetired===!currentKeys.includes(k),'retirement state differs from complete catalog');
+    const routes=Object.fromEntries(Object.entries(routeScopes).filter(([k])=>identity(k)===e.id));
+    const records=evidence.filter(r=>identity(r.key)===e.id);
+    const engine={id:e.id,driver:e.driver,options:e.options,modelRoutes:routes,evidence:records,retirementGenerations:history};
+    let raw=null,resolved=null;const resolutions=new Map();
+    if(currentKeys.length){const k=currentKeys[0],o=e.options[0],r=resolveModelEvidence({key:k,modelOption:o,engine,routeScope:routes[k]?.routeScope ?? '',evidence:records.filter(r=>r.key===k),decision:decisions[k]??null,preference:e.driver==='opencodeGo'?preference:null,retired:retired[k],now});raw=r.rawCatalogFingerprint;resolved=r.catalogFingerprint;resolutions.set(k,r);}
+    if(!currentKeys.length){
+      raw=fingerprint({engine:{id:e.id,driver:e.driver},models:[]});
+      // A retained historical target lets the verified resolver fingerprint an empty current catalog with tombstone claims.
+      const historical=Object.keys(history).find(k=>retired[k]?.modelOption&&routes[k]);
+      if(historical){const r=resolveModelEvidence({key:historical,modelOption:retired[historical].modelOption,engine,routeScope:routes[historical].routeScope,evidence:records.filter(r=>r.key===historical),decision:null,preference:null,retired:retired[historical],now});raw=r.rawCatalogFingerprint;resolved=r.catalogFingerprint;}
+      else if(!records.length)resolved=fingerprint({engine:{id:e.id,driver:e.driver},models:[],claims:[],retirementGenerations:history});
+    }
+    const inst=instances.find(i=>i.instanceId===e.id),catalogStale=e.catalogAt?now-Date.parse(e.catalogAt)>catalogStaleHours*3600000:null;
+    engines.push({id:e.id,driver:e.driver,options:e.options,modelRoutes:routes,retirementGenerations:history,catalogAt:e.catalogAt,catalogStale,ready:used?(inst?Boolean(inst.ready):configured.some(k=>k.startsWith(e.id+'/'))?false:null):null,readySource:used?'list_team_setup':'unknown',effortLevels:used?inst?.effortLevels??null:null,rawCatalogFingerprint:raw,catalogFingerprint:resolved});
+    internals.set(e.id,{engine,observed:e,resolutions});for(const k of currentKeys)universe.add(k);for(const m of e.models)if(m.usage!=null)universe.add(e.id+'/'+m.id);
+  }
+  const models=[...universe].sort(compare).map(key=>{
+    const engineId=identity(key),model=key.slice(key.indexOf('/')+1),entry=internals.get(engineId),e=entry?.observed,em=engines.find(e=>e.id===engineId);
+    const observed=e?.models.find(m=>m.id===model),current=e?.options.find(o=>o.id===model),state=retired[key],route=routeScopes[key];
+    let resolution=unknownModel();
+    if(entry&&state&&route&&(current||state.isRetired&&state.modelOption))resolution=entry.resolutions.get(key)??resolveModelEvidence({key,modelOption:current??state.modelOption,engine:entry.engine,routeScope:route.routeScope,evidence:entry.engine.evidence.filter(r=>r.key===key),decision:decisions[key]??null,preference:e.driver==='opencodeGo'?preference:null,retired:state,now});
+    const reasons=[],flags=[];
+    if(!allowedSet.has(key))reasons.push(REASONS.allowlist);if(!configuredSet.has(key))reasons.push(REASONS.configured);
+    if(!e||!e.catalogAt)reasons.push(REASONS.noCatalog);else if(!current||observed?.inCatalog===false)reasons.push(REASONS.withdrawn);
+    if(used&&em?.ready===false)reasons.push(REASONS.notReady);if(used&&em?.ready===true&&!live.has(key))reasons.push(REASONS.notListed);
+    if(!used&&em?.catalogStale===true)reasons.push(REASONS.staleNoLive);
+    const preferred=e?.driver==='opencodeGo'&&preference&&resolution.catalogFingerprint===preference.catalogFingerprint&&preference.confirmedBy==='user'&&preference.chosen?.includes(key)&&!resolution.decisionState.excludedAnswers?.some(a=>a.sourceRef===preference.sourceRef);
+    if(e?.driver==='opencodeGo'&&!preferred)reasons.push(REASONS.opencode);
+    if(em?.catalogStale)flags.push('catalog stale');if(!used)flags.push('readiness unverified');if(!observed?.usage)flags.push('never run here');if(resolution.priceEvidence.value===null)flags.push('price unknown');
+    if(!reasons.length&&!used&&e?.catalogAt)expiry=Math.min(expiry,Date.parse(e.catalogAt)+catalogStaleHours*3600000);
+    for(const field of ['tier','price','imageInput','contextTokens','toolUse']){
+      const result=field==='tier'?resolution.hierarchy:field==='price'?resolution.priceEvidence:resolution.capabilities[field];
+      for(const record of evidence.filter(r=>r.key===key&&r.field===field))if(result.status==='observed'&&result.sourceRefs.includes(record.sourceRef)&&!result.excluded.some(x=>x.sourceRef===record.sourceRef)){
+        const until=Date.parse(record.validUntil);expiry=Math.min(expiry,until);evidenceExpiry=evidenceExpiry===null?until:Math.min(evidenceExpiry,until);
+      }
+    }
+    const authorization={status:reasons.length?'refused':'allowed',reasons,flags};
+    const relevant=allowedSet.has(key)&&configuredSet.has(key)&&Boolean(current);
+    return {key,engine:engineId,model,allowlisted:allowedSet.has(key),configuredSelection:configuredSet.has(key),inCatalog:Boolean(current)&&observed?.inCatalog!==false,liveListed:used?live.has(key):null,opencodePreferred:e?.driver==='opencodeGo'?Boolean(preferred):null,
+      authorization,...resolution,decisionState:{...resolution.decisionState,needsUserChoice:relevant&&resolution.decisionState.needsUserChoice,options:relevant?resolution.decisionState.options:[]}};
+  });
+  const capabilityPolicy={minOutcomes:policy.capability?.minOutcomes??2,minSuccessRate:policy.capability?.minSuccessRate??0.7};
+  requireThat(Number.isSafeInteger(capabilityPolicy.minOutcomes)&&capabilityPolicy.minOutcomes>0&&Number.isFinite(capabilityPolicy.minSuccessRate)&&capabilityPolicy.minSuccessRate>=0&&capabilityPolicy.minSuccessRate<=1,'invalid capability policy');
+  const snapshot={schema:2,project,observedAt:new Date(now).toISOString(),expiresAt:new Date(expiry).toISOString(),evidenceExpiresAt:evidenceExpiry===null?null:new Date(evidenceExpiry).toISOString(),maxAgeMinutes,catalogStaleHours,
+    sources:{...sources,teamSetup:{path:teamSetup?.path??null,capturedAt:teamSetup?.capturedAt??null,status:captureStatus,detail}},engines,models,allowed:models.filter(m=>m.authorization.status==='allowed').map(m=>m.key),catalogModelsOmitted:0,currentFingerprints,capabilityPolicy,activeLimits,retired};
+  return {...snapshot,hash:fingerprint(snapshot)};
+}
+function isFresh(snapshot,now,currentFingerprints) {
+  try{
+    sourceMap(currentFingerprints);canonical(snapshot);
+    if(snapshot.schema!==2||!Number.isFinite(now))return false;
+    const {hash,...content}=snapshot,at=Date.parse(snapshot.observedAt),until=Date.parse(snapshot.expiresAt);
+    return hashString(hash)&&fingerprint(content)===hash&&Number.isFinite(at)&&Number.isFinite(until)&&until>=at&&now>=at&&now<=until&&(snapshot.evidenceExpiresAt===null||now<Date.parse(snapshot.evidenceExpiresAt))&&canonical(snapshot.currentFingerprints)===canonical(currentFingerprints);
+  }catch{return false;}
+}
+function decide(snapshot,key) {
+  try{identity(key);}catch{return {decision:'refused',reasons:['invalid model identity']};}
+  const model=snapshot?.models?.find(m=>m.key===key);
+  return model&&snapshot.allowed.includes(key)&&model.authorization.status==='allowed'?{decision:'allowed',reasons:[]}:{decision:'refused',reasons:model?.authorization.reasons??['not in provider snapshot']};
+}
+function evaluateTask(snapshot,key,profile,context) {
+  canonical({snapshot,key,profile,context});
+  const result=(decision,reasons,premiumJustification=null)=>({decision,reasons,needsUserChoice:decision==='held',premiumJustification});
+  const auth=decide(snapshot,key);if(auth.decision==='refused')return result('refused',auth.reasons);
+  const now=context.now;if(!isFresh(snapshot,now,context.currentFingerprints??snapshot.currentFingerprints))return result('refused',['invalid/expired/changed provider snapshot']);
+  const cx=['low','medium','high'],budgets=['free-first','balanced','best-quality'];
+  if(!profile||!nonempty(profile.slice)||!nonempty(profile.workKind)||!cx.includes(profile.complexity)||!budgets.includes(profile.budget)||!profile.needs||typeof profile.needs.toolUse!=='boolean'||typeof profile.needs.imageInput!=='boolean'||!Number.isSafeInteger(profile.needs.contextTokens)||profile.needs.contextTokens<0)return result('refused',['invalid task profile']);
+  if(profile.estimatedTokens!==undefined&&(!profile.estimatedTokens||!['input','output','cachedInput'].every(k=>Number.isSafeInteger(profile.estimatedTokens[k])&&profile.estimatedTokens[k]>=0)))return result('refused',['invalid estimated token counts']);
+  const m=snapshot.models.find(m=>m.key===key),refused=[],held=[];
+  const limits=[...snapshot.activeLimits,...(context.limits??[])];
+  for(const l of limits){
+    requireThat(l&&nonempty(l.engine),'invalid limit');if(l.at!==undefined)observation(l.at,now,'limit observation');
+    const end=l.until??l.resetAt??l.expiresAt,until=end==null?Infinity:Date.parse(end);requireThat(Number.isFinite(until)||until===Infinity,'invalid limit expiry');
+    if(l.engine===m.engine&&(l.scope!=='model'||l.model===m.model)&&until>now)refused.push('active account/model limit');
+  }
+  for(const field of ['toolUse','imageInput'])if(profile.needs[field]){const value=m.capabilities[field].value;if(value===false)refused.push(`known incapable: ${field}`);else if(value!==true)held.push(`unknown required capability: ${field}`);}
+  if(profile.needs.contextTokens>0){const value=m.capabilities.contextTokens.value;if(value===null)held.push('unknown required capability: contextTokens');else if(value<profile.needs.contextTokens)refused.push('known incapable: contextTokens');}
+  let success=0,failure=0;
+  for(const o of context.outcomes??[]){
+    if(o.engine!==m.engine||o.model!==m.model||!cx.includes(o.complexity)||['limit','transient'].includes(o.result))continue;
+    requireThat(['ok','broken','too-big','spec','repeated'].includes(o.result),'invalid applicable outcome result');
+    if(o.at!==undefined)observation(o.at,now,'outcome observation');
+    if(o.result==='ok'&&cx.indexOf(o.complexity)>=cx.indexOf(profile.complexity))success++;
+    if(o.result!=='ok'&&cx.indexOf(o.complexity)<=cx.indexOf(profile.complexity))failure++;
+  }
+  const count=success+failure,proven=count>=snapshot.capabilityPolicy.minOutcomes&&success/count>=snapshot.capabilityPolicy.minSuccessRate;
+  if(count>=snapshot.capabilityPolicy.minOutcomes&&!proven)refused.push('known incapable: outcome threshold');
+  function approved(a){
+    if(!a||a.approvedBy!=='user'||!nonempty(a.sourceRef)||!Array.isArray(a.keys)||!a.keys.includes(key)||a.profileHash!==fingerprint(profile))return false;
+    sourceUrl(a.sourceRef);const start=Date.parse(a.approvedAt),end=Date.parse(a.expiresAt);return Number.isFinite(start)&&Number.isFinite(end)&&start<=now&&end>start&&now<=end;
+  }
+  if(profile.complexity!=='low'&&!proven&&!approved(context.unprovenAcceptance))held.push('capability outcomes unproven; smaller authorized pilot or exact user acceptance required');
+  const tier=m.hierarchy.value;
+  if(tier==='unknown')held.push('provider tier unresolved');
+  const price=m.priceEvidence.value;
+  if(!price||price.input===null||price.output===null||(profile.estimatedTokens?.cachedInput>0&&price.cachedInput===null))held.push('price evidence unresolved');
+  let justification=null;
+  if(tier==='premium'){
+    const need=profile.premiumNeed;
+    const justified=need&&Array.isArray(need.requirementIds)&&need.requirementIds.length&&need.requirementIds.every(nonempty)&&nonempty(need.reason)&&Array.isArray(need.cheaperRejected)&&need.cheaperRejected.length&&need.cheaperRejected.every(r=>{
+      if(!r||!nonempty(r.key)||r.key===key||!nonempty(r.reason)||!nonempty(r.evidenceRef))return false;
+      try{identity(r.key);sourceUrl(r.evidenceRef);return true;}catch{return false;}
+    });
+    if(!justified)refused.push('premium requires documented task need and cheaper-alternative evidence');
+    if(!approved(context.approval))refused.push('premium requires exact current user permission');
+    if(justified&&approved(context.approval))justification={need,sourceRef:context.approval.sourceRef,profileHash:fingerprint(profile)};
+  }
+  if(refused.length)return result('refused',[...new Set(refused)],justification);
+  return held.length?result('held',[...new Set(held)],justification):result('allowed',[],justification);
+}
+module.exports = {buildSnapshot,isFresh,decide,REASONS,fingerprint,resolveModelEvidence,evaluateTask};
