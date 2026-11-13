@@ -1,0 +1,76 @@
+# R&D: generic provider hierarchy and economical dispatch
+
+Project/feature: software-factory/provider-snapshot. Compass, 2026-11-12. **v2 approved (reported by Atlas); v2.1 internal contract clarification**. Normative contract: `prd.md`; v1 retained in `artifacts/v1-prd.md` and `artifacts/v1-research.md` as historical evidence only.
+
+## What was checked
+
+Independently read factory main `09d01c56bec990281eb40fa5391caffa2bf7af0a`, Hattera main `07e5f29df4cfbe134274d05e0d5a4fdfa2153b1b`, current plan files and four candidate Git objects. Factory status showed only untracked `projects/`. No builds, product test runs, model calls, probes, commits or product edits. `supply` first failed EPERM trying to write live `state/routing/supply.json`; reran successfully with FACTORY_STATE_DIR in this task workspace. Saved sanitized output at `artifacts/supply-2026-11-12.json` (observedAt 2026-11-12T08:35:06.645Z), and extracted catalog fields/hashes/coverage at `artifacts/provider-signals.json`. No credentials copied.
+
+Labels: **observed** = read source/data here; **reported** = teammate/session report not independently confirmed; **inferred** = conclusion from evidence; **unavailable** = not exposed by this surface; **unverified** = not tested. Freshness is observation time, never proof of account entitlement or execution.
+
+Atlas's authorized resume note reports live list_team_setup with Claude and Codex ready at about 14:02 Asia/Calcutta, and Compass default Codex/high. The current Compass tool catalog does not expose list_team_setup or raw provider acknowledgement for this turn. **Actual executed model/effort is unconfirmed**, not derived from default, usage ledger or this bot's name. Tools worked in this resumed turn; no Claude launch/retry was made. Reported exhausted Claude 5-hour route resets 2026-11-12 15:20 Asia/Calcutta: **LIMIT AFTER PROGRESS**, preserve checkpoint and avoid that route. The catalog's ready flag does not override the limit. If an execution adapter reports Claude for this retained thread, stop and return a routing blocker rather than relaunching it.
+
+Project memory: `factory-memory.cjs context software-factory provider-snapshot <baseline>` returned Unknown project; `get software-factory feature provider-snapshot` returned Record not found. `projects` listed only hattera. No automatic registration or shared DB mutation; Atlas reconciles before dispatch. This is a tracking limitation, not a reason to leave the concrete planning files unfinished.
+
+## Signals actually available
+
+`tools/factory-route.cjs:66-73`: global configured selections from app/bots/tasks; authorization evidence, not model hierarchy. `:79-117`: supply reads configured instance IDs, catalog mtime/options and last two ledger files. It projects only id, label, contextWindow, explicit free flag, catalog membership and usage summaries. It does **not** expose hierarchy, readiness, effort, model price vectors, provider identity/account scope or capabilities beyond context. `:100-105` treats only explicit priceReported free as free; labels never prove free. All 10 current cached catalogs have zero explicit free fields.
+
+`server/runtime.ts:18433-18454` in Hattera: team-setup endpoint is Chief-only, filters ready instances to models already selected on bots/settings, returns models and instance effort levels. `server/default-model-selection.ts:33-35`: ready means enabled/available/not refused/not signed out. This is neither numeric quota headroom nor availability of every model in a provider. Captures are Lead-written attestations, not cryptographically verified provider responses.
+
+| Engine scope | Observed cache/supply | Other evidence | Limitations / classification |
+|---|---|---|---|
+| Codex (reported ready) | 8 IDs, labels only; catalog 2026-11-10T08:38:12.896Z; stale. No price/tier/capability/effort in supply. | Hattera historical LIST_PRICES exact matches 4/8; bundled models.dev vendor-row exact matches 7/8. Current official OpenAI pages describe positioning, context and prices. | Official descriptions are usable evidence, not normalized task-tier policy. API-equivalent cost is not subscription marginal cost. Hard capabilities/account scope need exact route evidence. Missing normalization asks user. |
+| Claude (reported ready, quota blocked) | 8 IDs; label and contextWindow on some options; catalog 2026-11-11T15:21:22.400Z, fresh at capture. | Historical LIST_PRICES exact 5/8; bundled vendor row exact 7/8. Current official model and pricing pages provide exact IDs, positioning, capability limits and rates. Ledger includes reported cost on some turns. | Current public lineup differs from cached lineup. No normalized tier field. Reported cost is not proof a future task can run; no quota retries. |
+| Cursor | 5 IDs/labels; stale; no prices, hierarchy or capabilities. | No live ready tool evidence for Cursor here. | Previously described as everyday without evidence: **unverified and withdrawn**. Auto routes have unknown underlying identity/cost. |
+| OpenCode | 191 cached IDs/labels, plus 1 withdrawn usage identity in supply; stale; no explicit free metadata. | Local generic catalog can contain modality/context/cost; OpenCode raw cache location is defined by Hattera. | Not confirmed ready here; names ending in free prove nothing. Do not run discovery response probes for this R&D. Exact reseller/provider mapping and project preference required. |
+| chatgpt, claudeApi, droid, grok, kimi, hermes | Counts 8, 8, 10, 3, 4, 1 respectively. Fields enumerated in provider-signals.json; no structured price/tier in cache. | Some context/custom flags; source price tables overlap some IDs. | Cache existence is not readiness. Do not represent these as connected ready routes. |
+| Remaining 13 configured instances | No catalog in supply. | No live evidence. | Unavailable for ranking from these observations, not proven permanently unusable. |
+
+Counts concern raw catalog options; usage adds withdrawn rows. Provider signal evidence is dated, not a permanent model list. Model IDs appear in research captures only; no factory rules or templates assign them tiers.
+
+### Official provider evidence read on 2026-11-12
+
+OpenAI's [model catalog](https://developers.openai.com/api/docs/models) distinguishes demanding reasoning, balanced cost/intelligence and high-volume use. It also publishes tools, context and effort controls. Its [pricing page](https://developers.openai.com/api/docs/pricing) lists input/output/cache rates and multiple service modes. **Observed:** usable positioning/cost evidence. **Inferred:** the page heading alone cannot map every entry to one factory premium tier; the page groups several differently priced models together. Effort controls do not establish tier. Access through this Codex account and actual marginal charges remain unverified.
+
+Anthropic's [models overview](https://platform.claude.com/docs/en/models/overview) compares four current positions, latency, tool/modality support, context and effort. The [pricing page](https://platform.claude.com/docs/en/about-claude/pricing) separates base/cache rates and a context-band threshold. **Observed:** comparative hierarchy signals are available publicly. **Inferred:** price and effort alone cannot establish a normalized premium label or fitness for a factory slice. An exact source-backed mapping or user answer is required. Redirect from the old overview URL was inspected; the destination is the models overview, not a sign-in page.
+
+Captures and bounded paraphrases: `artifacts/official-provider-evidence.json`. No spending commitment follows these pages. Official recommendations to start with a flagship are provider advice, not user authorization.
+
+### Price-source limitations and prior research correction
+
+Hattera `server/model-prices.ts:1-17,30-46,50-76,143-171` carries hand-maintained rates with source/asOf (2026-09-23), exact ID lookup and API-equivalent caveats. Operator-specific rates override the table. `server/usage-ledger.ts:46-51,285-300` distinguishes reported/estimated/unpriced; aggregate spend or token concentration cannot tell which model is premium or whether its inference is capable. Main factory supply aggregates costs without preserving all source distinctions; v2 audit reads raw rows and keeps provenance.
+
+`server/model-catalog/trim.ts:26-43` retains cost, reasoning, modalities, context and release date. It **does not retain family** in this trimmed type; earlier broad claims that every connected catalog has family were inaccurate. Bundled snapshot updatedAt 2026-09-30T05:32:26Z; models.dev is secondary evidence. Hattera cache path `server/model-catalog/catalog.ts:101-108`, OpenCode cache under XDG_CACHE_HOME or ~/.cache/opencode/models.json. These paths do not establish that files exist or are fresh; no cache refresh was attempted. Broad exact-ID overlap across all vendor/reseller rows can match the wrong supplier; never choose provider mapping by maximum overlap. Coverage in artifacts explicitly names the vendor row and is only overlap, not route identity verification.
+
+## Options, trade-offs and recommendations
+
+| Uncertainty | Options and evidence | Recommendation |
+|---|---|---|
+| Generic hierarchy | Hardcode names (stales and violates request); infer from prices/effort (unsupported); structured evidence plus held user answer (works with missing metadata). | Local generic evidence envelope, explicit source/time/confidence and per-project answers. No provider-specific tier rules. |
+| Capability | Tier or price as proxy; actual hard metadata plus relevant task outcomes. Existing route :279-296 admits unknown context/image as flags. | Unknown hard requirements hold; retain outcome learning. Low-complexity authorized pilot only, no inference probes during R&D. |
+| Cost order | Weighted reliability may pick a dearer model; raw rate scalars ignore input/output/context. | Hard capability first; compare like-for-like vectors or explicit task estimate/user comparative order; then tie-break existing scores. Unknown stays held. |
+| Premium control | Arbitrary rolling token cap; premium-by-role; per-slice need and owner permission. The ledger lacks reliable universal billed cost and identity. | Per-slice permission, no automatic role premium or empty-tier promotion. No numerical cap needed to finish this plan. |
+| Authorization reachability | Expand to all configured/catalog models; retain existing project allowlist intersection. | Retain boundary. Tier/preference never authorizes. Ask actual rollout candidates when needed; bot setup changes remain separate user-approved actions. |
+| Catalog change | Invalidate on file mtime (needless repeated prompts); retain answers forever (stale preference); substantive fingerprints. | Model answers bound to model content; comparative/OpenCode offered-set answers bound to engine catalog content. Retirement tombstones stop old answers reviving. |
+| Delivery size | Original 8 large briefs; smaller sessions around resolver/import/ranking/failure verification. | 12 dispatchable sessions, each 20–30 minutes; serialize shared files. |
+
+Legacy module ranking stays advisory for compatibility, but is never dispatch authorization. Guard all CLI/native actions using the shared evaluator. No end-to-end native enforcement exists in Hattera today: role instructions/checks are discipline, not an execution interceptor. Automatic correlation and schema source authenticity remain explicit limitations.
+
+## Commit reconciliation and verification status
+
+Read all four Git objects; main lacks snapshot tools. S1 a3b73e4 is schema-1 core; S2 ef331c7 adds authorization/snapshot CLI; S6 e3a6298 adds documentation; S7 354f880 contains seven-file role/release diff from **e3a6298**. All need rework; S7 appended text is superseded. Details and full SHAs in PRD delivery matrix. Old S1/S2/S6 passes are historical, not v2 acceptance. S7 independent verification remains absent. No tests were executed on these code branches here.
+
+`factory-brief.cjs` exports a section checker but no CLI; actual command is `node tools/factory-gates.cjs brief <path>`. It validates required filled headings only; manual contract consistency review is additionally required. Planning validation results are saved separately in `artifacts/planning-validation.json` after drafting. Future independent acceptance lives in S8A/S8; do not mistake brief-gate passes for implementation verification.
+
+## Open decisions and handoff
+
+Historical v2 approval question is resolved according to Atlas: user approval 14:32 and implementation instruction 15:02 Asia/Calcutta on 2026-11-12. V2.1 clarifies internal inputs/hash binding only; no new user approval question. No credential, numerical cap or bot change is required to finish planning. Unknown tiers/cost preferences and any expanded authorization need real user answers at rollout, using concrete candidates. Atlas must reconcile project memory and verify actual native execution route before dispatch. Atlas dispatch governs implementation under the reported v2 approval; merge/push/release/live-state/team-sync remain outside this correction.
+
+## v2.1 contract correction (2026-11-12)
+
+The approved behavior is unchanged. Atlas adopted the consultation at C:/Users/shant/.openmausbot/task-workspaces/eee91b48-6282-4de0-9e32-4e617197d24f/e1d4862d-7c20-409f-95f1-d676d43711a7/S1A-contract-consultation.md and settled complete engine/retirement inputs, explicit projection sorting and two-stage raw/resolved bindings. The earlier wording risked hash recursion and comparative-answer revival after unrelated retirement. PRD v2.1 specifies exact projections and no automatic evidence rebinding. This documentation correction reuses prior research; no product edits, tests/builds, provider calls, settings or DB writes. Approval/dispatch reports are attributed to Atlas, not independently confirmed from private user conversations.
+
+## v2.2 source authority correction (2026-11-12)
+
+Atlas adopted the bounded S2A-source-authority-consultation at C:/Users/shant/.openmausbot/task-workspaces/eee91b48-6282-4de0-9e32-4e617197d24f/e1d4862d-7c20-409f-95f1-d676d43711a7/S2A-source-authority-consultation.md. Read Git object 29cd874b812c70c870d6a04ccab7e693ee2ae634 independently: provider-snapshot.cjs:183-188 accepts nine hashes but does not derive their source preimages; factory-route.cjs:23-34,66-81 has no independent provider/account identity source. Main remains 09d01c56bec990281eb40fa5391caffa2bf7af0a. V2.2 adds a sanitized session-bound manual route capture with native-only metadata binding, exact shared nine-source preimages and fail-closed I/O handling. Identity is an operator attestation, never authenticated provider/account truth. Account switches outside native file observations remain undetectable and require renewed attestation. Full catalog route coverage is identity data, not authorization for unselected models. S1 code/pure contract and approved economic policy remain unchanged. No product code/checks/builds, live state, credentials, settings or DB writes in this correction. The fixture is wholly synthetic; Atlas reports S2A v2 changes-needed-spec and owns resumption. No new user decision is required; real rollout may remain held for absent identity evidence.
