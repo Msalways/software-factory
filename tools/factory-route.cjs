@@ -365,11 +365,11 @@ function cheapestTieGroup(relevant, profile) {
   }
   return winners;
 }
-// A candidate held only for provider tier or price can still be chosen when the cost comparison itself
-// (dominance/estimate/preference) resolves it as the unique or tied winner — that is what resolves the
-// unknown. A candidate held for capability/outcome reasons is never resolvable this way (brief: "Assert
-// unknown alongside otherwise qualified known worker causes held unless evidence rules it out").
-const RESOLVABLE_HOLD_REASONS = new Set(['provider tier unresolved', 'price evidence unresolved']);
+// Provider tier is classification, not cost: an unresolved tier is never cleared by cost comparison and always
+// holds, as in check. Unresolved price can be cleared only by an actual comparison (dominance/estimate/
+// owner comparative rank) against at least one other relevant candidate, so a singleton or an unranked pair
+// holds. Capability/outcome holds are never resolvable this way.
+const RESOLVABLE_HOLD_REASONS = new Set(['price evidence unresolved']);
 function routeProject(profile, opts) {
   const project = opts.project;
   const context = {now: now(), ...opts.context};
@@ -398,7 +398,8 @@ function routeProject(profile, opts) {
     if (!tieGroup.length) {
       held = true; holdReason = 'crossing or otherwise incomparable price vectors across relevant candidates; no comparable winner';
     } else {
-      const unresolvable = tieGroup.filter(c => c.evaluation.decision !== 'allowed' && !c.evaluation.reasons.every(r => RESOLVABLE_HOLD_REASONS.has(r)));
+      const compared = relevant.length > 1;
+      const unresolvable = tieGroup.filter(c => c.evaluation.decision !== 'allowed' && (!compared || !c.evaluation.reasons.every(r => RESOLVABLE_HOLD_REASONS.has(r))));
       if (unresolvable.length) {
         held = true;
         holdReason = `held candidate cannot be ruled out of the cheapest-or-tied group: ${unresolvable.map(c => `${c.key} (${c.evaluation.reasons.join('; ')})`).join('; ')}`;

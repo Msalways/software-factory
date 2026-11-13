@@ -486,3 +486,29 @@ test('project mode: legacy route() without opts.project stays advisory (dispatch
   assert.equal(r.dispatchAuthorized, false);
   assert.equal(r.mode, undefined);
 });
+
+// S3B: unresolved tier/price is a hold independent of cost comparison, single and multi candidate.
+function assertHeld(r, pattern) {
+  assert.equal(r.held, true);
+  assert.equal(r.choice, null);
+  assert.equal(r.dispatchAuthorized, false);
+  assert.match(JSON.stringify(r.relevantCandidates) + r.holdReason, pattern);
+}
+test('S3B: single candidate with unknown tier holds', () => {
+  assertHeld(routeP([fx('engS/unknown-tier', {tier: 'unknown', price: px(1, 1)})], profileFx()), /provider tier unresolved/);
+});
+test('S3B: single candidate with unresolved price holds even without a comparison', () => {
+  assertHeld(routeP([fx('engS/no-price', {price: null})], profileFx()), /price evidence unresolved/);
+});
+test('S3B: cheaper unknown-tier candidate is neither selected nor dropped in favour of a dearer known worker', () => {
+  const r = routeP([fx('engT/unknown-cheap', {tier: 'unknown', price: px(1, 1)}), fx('engU/known-dear', {price: px(5, 5)})], profileFx());
+  assertHeld(r, /provider tier unresolved/);
+  assert.ok(!/cheapest task-qualified candidate/.test(r.reason));
+});
+test('S3B: unknown-tier candidate stays held even when preference ordering ranks it first', () => {
+  const r = routeP([fx('engT/unknown-pref', {tier: 'unknown', price: null, preferenceRank: 0}), fx('engU/known-pref', {price: null, preferenceRank: 1})], profileFx());
+  assertHeld(r, /provider tier unresolved/);
+});
+test('S3B: unresolved-price candidate without estimate or comparative answer holds against a known worker', () => {
+  assertHeld(routeP([fx('engV/no-price', {price: null}), fx('engW/priced', {price: px(5, 5)})], profileFx()), /./);
+});

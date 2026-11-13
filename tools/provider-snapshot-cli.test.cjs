@@ -178,9 +178,9 @@ test('same catalog content refresh does not change the catalog fingerprint; a su
 });
 // ---------- guarded route CLI (S3): source/snapshot fixtures stay isolated from the user's home.
 const routeProfile=(extra={})=>({slice:'route-s3',workKind:'implement',complexity:'low',budget:'free-first',needs:{toolUse:true,imageInput:false,contextTokens:8000},...extra});
-function routeFixture({qualified=true,limit=false,incapable=false}={}){
+function routeFixture({qualified=true,limit=false,incapable=false,tier=true,price=true}={}){
   commandSetup();
-  if(qualified){const e=evidence();e.records=[['tier',{nativeTier:'observed-standard',normalized:'worker'}],['price',{currency:'USD',unit:'token',input:1,output:1,cachedInput:0,basis:'account'}],['toolUse',!incapable],['contextTokens',32000]].map(([field,value])=>({...e.records[0],field,value,sourceRef:'fixtures/route-'+field+'.json'}));const r=cli('evidence-import',e);assert.equal(r.status,0,r.stderr);}
+  if(qualified){const e=evidence();e.records=[['tier',{nativeTier:'observed-standard',normalized:'worker'}],['price',{currency:'USD',unit:'token',input:1,output:1,cachedInput:0,basis:'account'}],['toolUse',!incapable],['contextTokens',32000]].filter(([field])=>!(field==='tier'&&!tier)&&!(field==='price'&&!price)).map(([field,value])=>({...e.records[0],field,value,sourceRef:'fixtures/route-'+field+'.json'}));const r=cli('evidence-import',e);assert.equal(r.status,0,r.stderr);}
   if(limit)write(path.join(state,'limit-events.jsonl'),JSON.stringify({at:new Date().toISOString(),engine:'fixture-engine',model:null,scope:'engine',signal:'fixture account limit',resetAt:new Date(Date.now()+60000).toISOString()})+'\n');
   sleepPastMtimeGranularity();return takeSnapshot(project);
 }
@@ -270,3 +270,12 @@ for(const [name,change,code] of [
  ['at snapshot observation',(receipt,snapshot,row)=>receipt.decidedAt=snapshot.observedAt,0],
  ['valid original decision',()=>{},0],
 ])test('audit historical chronology: '+name,()=>{const row=historicalRun({tier:'premium',costUsd:6,input:70,output:20}),file=row.receiptPath,receipt=JSON.parse(fs.readFileSync(file)),snapshot=JSON.parse(fs.readFileSync(receipt.providerSnapshot.path));change(receipt,snapshot,row);write(file,receipt);ledger([row]);const r=auditCli();assert.equal(r.status,code,r.stderr);const a=JSON.parse(r.stdout),historical=a.rows[0];assert.equal(a.tokens.total,90);assert.deepEqual(a.costSources.reported,{rows:1,usd:6});assert.equal(a.actualIdentity.confirmed,1);assert.equal(historical.currentPolicyComparison.allowlisted,true);if(code===7){assert.equal(historical.authorizationAtRun,'unknown');assert.equal(historical.tierAtRun,'unknown');assert.match(historical.findings.join('; '),/not contemporaneous/);assert.equal(a.premiumCoverage.eligibleRows,0);assert.equal(a.premiumCoverage.unknownTierRows,1);assert.deepEqual(a.premiumCoverage.tokens,{eligible:null,premium:null,share:null});assert.equal(a.premiumCoverage.reportedCost.eligible,null);}else{assert.equal(historical.authorizationAtRun,'authorized');assert.equal(historical.tierAtRun,'premium');assert.equal(a.premiumCoverage.tokens.share,1);assert.equal(a.findings.length,0);}});
+
+// S3B: route must hold exactly where check holds; unresolved tier/price is never cleared by cost ranking.
+for(const [name,opts] of [['unknown tier',{tier:false}],['unresolved price',{price:false}]])test('S3B route holds8 for '+name+' like check, with no choice and no permission in stdout or receipt',()=>{
+  const s=routeFixture(opts);const c=checked(checkArgs('route'),8);assert.ok(c.result.reasons.length);
+  const r=routeCli();assert.equal(r.status,8,r.stderr);const v=JSON.parse(r.stdout);
+  assert.equal(v.dispatchAuthorized,false);assert.equal(v.choice,null);assert.equal(v.providerSnapshot.hash,s.hash);assert.ok(v.unknowns.length);assert.equal(v.premiumJustification,null);
+  const saved=JSON.parse(fs.readFileSync(v.file,'utf8'));assert.equal(saved.dispatchAuthorized,false);assert.equal(saved.choice,null);assert.deepEqual(v.fallbacks,[]);
+});
+test('S3B positive control: resolved tier and price still route with exit0 and permission',()=>{routeFixture();const r=routeCli();assert.equal(r.status,0,r.stderr);const v=JSON.parse(r.stdout);assert.equal(v.dispatchAuthorized,true);assert.equal(JSON.parse(fs.readFileSync(v.file,'utf8')).dispatchAuthorized,true);});
