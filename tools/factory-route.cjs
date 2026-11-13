@@ -6,7 +6,7 @@
 //   supply   [--json]                         snapshot of engines/models/evidence -> state/routing/supply.json
 //   allowlist <project> (--add e/m,... --source text | --remove e/m,... | --show)
 //   snapshot <project> [--team-setup file|-] [--captured-at ISO] [--evidence file] [--json]
-//   route    <profile.json> [--work-kind kind] [--exclude e/m,..] [--avoid engine,..] [--not-engine e] [--json]
+//   route    <profile.json> --project <project> [--work-kind kind] [--exclude e/m,..] [--avoid engine,..] [--not-engine e] [--json]
 //                                             ranked candidates + routing receipt -> state/routing/receipts/
 //   limit    <engine> [--model m] [--reset ISO] [--model-scoped] --signal "<text>"  record a limit event
 //            (account/engine-wide by default; --model-scoped only when the engine says the limit is per model)
@@ -372,17 +372,24 @@ function routeProject(profile, opts) {
   const context = {now: now(), ...opts.context};
   const snap = Object.prototype.hasOwnProperty.call(opts, 'snapshot') ? opts.snapshot : loadSnapshot(project);
   const rejected = [], relevant = [];
+  const excluded = new Set(opts.exclude || []);
+  let profileInvalid = false;
   if (snap) {
     for (const key of snap.allowed) {
+      if (excluded.has(key) || opts.notEngine === key.split('/')[0]) { rejected.push({candidate:key,reason:'excluded by route flag'});continue; }
       const ev = snapshotLib.evaluateTask(snap, key, profile, context);
-      if (ev.decision === 'refused') { rejected.push({candidate: key, reason: ev.reasons.join('; ') || 'refused'}); continue; }
+      if (ev.decision === 'refused') {
+        if (ev.reasons.includes('invalid task profile')) profileInvalid = true;
+        rejected.push({candidate: key, reason: ev.reasons.join('; ') || 'refused'}); continue;
+      }
       relevant.push({key, model: snap.models.find(m => m.key === key), evaluation: ev});
     }
   }
   let held = !snap, holdReason = snap ? null : `no provider snapshot captured for project ${project}; run snapshot first`;
-  let tieGroup = [], choice = null;
+  let tieGroup = [], choice = null, noCapableCandidate = false;
   if (snap && !relevant.length) {
     held = true; holdReason = 'no task-qualified candidate in snapshot.allowed for this profile (see rejected)';
+    noCapableCandidate = !profileInvalid;
   } else if (snap) {
     tieGroup = cheapestTieGroup(relevant, profile);
     if (!tieGroup.length) {
@@ -437,7 +444,7 @@ function routeProject(profile, opts) {
     profile: {complexity: profile.complexity, budget: profile.budget, needs: profile.needs, attempt: profile.attempt || 1},
     choice: choice ? {engine: choice.key.split('/')[0], model: choice.key.slice(choice.key.indexOf('/') + 1), key: choice.key,
       price: choice.model.priceEvidence.value, tier: choice.model.hierarchy.value} : null,
-    held, holdReason, needsUserChoice: held,
+    held, holdReason, needsUserChoice: held, profileInvalid, noCapableCandidate,
     relevantCandidates: relevant.map(c => ({candidate: c.key, decision: c.evaluation.decision, reasons: c.evaluation.reasons,
       price: c.model.priceEvidence.value, tier: c.model.hierarchy.value, preferenceRank: c.model.decisionState?.preferenceRank ?? null})),
     costTieGroup: tieGroup.map(c => c.key),
@@ -738,6 +745,45 @@ const IDENTITY_HOLD_PATTERNS = [
 ];
 const isIdentityHold = message => IDENTITY_HOLD_PATTERNS.some(p => p.test(message));
 
+// CLI permission boundary: fresh independently read source hashes, never a saved map as current truth.
+function routeCommand(profile,opts) {
+  const project=projectId(opts.project), nonempty=v=>typeof v==='string'&&v.trim();
+  snapshotLib.fingerprint(profile); // Reject unsafe/non-JSON fields before any route can be authorized.
+  if(!profile||!nonempty(profile.slice)||!nonempty(profile.workKind)||!LEVELS.includes(profile.complexity)||!['free-first','balanced','best-quality'].includes(profile.budget)||!profile.needs||typeof profile.needs.toolUse!=='boolean'||typeof profile.needs.imageInput!=='boolean'||!Number.isSafeInteger(profile.needs.contextTokens)||profile.needs.contextTokens<0)throw Error('invalid task profile');
+  if(profile.estimatedTokens!==undefined&&(!profile.estimatedTokens||!['input','output','cachedInput'].every(k=>Number.isSafeInteger(profile.estimatedTokens[k])&&profile.estimatedTokens[k]>=0)))throw Error('invalid estimated token counts');
+  const base={mode:'project',project,slice:profile.slice,profile,profileHash:snapshotLib.fingerprint(profile),providerSnapshot:{path:snapshotPath(project),hash:null,observedAt:null},choice:null,dispatchAuthorized:false,held:false,needsUserChoice:false,candidates:[],exclusions:[],costOrder:null,premiumJustification:null,unknowns:[],fallbacks:[],actual:{engine:null,model:null,effort:null,confirmedBy:'unconfirmed'}};
+  const failed=(code,reason)=>({exitCode:code,result:{...base,reason,held:code===8,needsUserChoice:code===8}});
+  let source;
+  try{source=readCurrentSources({project,sessionId:process.env.FACTORY_SESSION_ID,now:now()});}
+  catch(error){return failed(isIdentityHold(error.message)?8:2,error.message);}
+  const snap=loadSnapshot(project);
+  if(snap)base.providerSnapshot={path:snapshotPath(project),hash:snap.hash??null,observedAt:snap.observedAt??null};
+  if(!snap||snap.project!==project||!Array.isArray(snap.allowed)||!Array.isArray(snap.models)||new Set(snap.allowed).size!==snap.allowed.length||snap.allowed.some(k=>!source.inputs.configured.includes(k)||!source.inputs.allowlist.some(a=>(typeof a==='string'?a:a.id)===k)||!source.inputs.engines.some(e=>e.options.some(o=>e.id+'/'+o.id===k)))||!snapshotLib.isFresh(snap,now(),source.currentFingerprints))return failed(5,'invalid/missing/expired/changed provider snapshot; run snapshot explicitly');
+  let outcomes=[];
+  try{outcomes=fs.readFileSync(P.outcomes,'utf8').split(/\r?\n/).filter(x=>x.trim()).map(parseSourceJson);}
+  catch(error){if(error.code!=='ENOENT')return failed(2,error.message);}
+  const context={now:now(),currentFingerprints:source.currentFingerprints,outcomes,limits:[...activeLimits().values()],approval:source.preimages.decisions.premiumApprovals[profile.slice]??null};
+  const r=route(profile,{...opts,snapshot:snap,context});
+  const result={...base,...r,profile,profileHash:base.profileHash,providerSnapshot:base.providerSnapshot,
+    candidates:r.relevantCandidates,exclusions:r.rejected,
+    costOrder:{method:'dominance, complete estimate or catalog preference; reliability/latency/avoid for equal-cost ties only',tieGroup:r.costTieGroup,candidates:r.relevantCandidates.map(c=>({key:c.candidate,price:c.price,preferenceRank:c.preferenceRank,estimatedCost:estimatedTotalCost(c.price,profile.estimatedTokens)}))},
+    unknowns:r.relevantCandidates.filter(c=>c.decision==='held').map(c=>({key:c.candidate,reasons:c.reasons})),
+    planned:{engine:r.choice?.engine??null,model:r.choice?.model??null,effort:null,workKind:profile.workKind,tier:r.choice?.tier??null},
+    usage:{inputTokens:null,outputTokens:null,promptBytes:null,source:'unreported'},handoffs:0,mentorQuestions:0,escalations:[],outcome:null,
+    timestamps:{createdAt:r.decidedAt,updatedAt:r.decidedAt,closedAt:null}};
+  // A decision is not an engine acknowledgement; no unguarded legacy fallback list is returned.
+  result.fallbacks=[];
+  try{source.revalidate(now());}
+  catch(error){return failed(isIdentityHold(error.message)?8:5,error.message);}
+  if(!snapshotLib.isFresh(snap,now(),source.currentFingerprints))return failed(5,'provider snapshot expired during routing');
+  fs.mkdirSync(P.receipts,{recursive:true});
+  const file=path.join(P.receipts,'project-'+require('node:crypto').randomUUID()+'.json'),temp=file+'.tmp';
+  result.file=file;
+  try{fs.writeFileSync(temp,JSON.stringify(result,null,2),{flag:'wx',mode:0o600});try{source.revalidate(now());}catch(error){return failed(isIdentityHold(error.message)?8:5,error.message);}if(!snapshotLib.isFresh(snap,now(),source.currentFingerprints))return failed(5,'provider snapshot expired during receipt write');fs.renameSync(temp,file);}
+  finally{if(fs.existsSync(temp))fs.unlinkSync(temp);}
+  return {result,exitCode:r.choice?0:r.profileInvalid?2:r.noCapableCandidate?3:8};
+}
+
 // ---------- CLI
 if (require.main === module) {
   const a = process.argv.slice(2);
@@ -819,17 +865,19 @@ if (require.main === module) {
         for (const m of used) console.log(`    ran ${m.id}${m.inCatalog ? '' : '  [WITHDRAWN from catalog]'} runs=${m.usage.runs} 5h_tokens=${m.usage.tokens5h}`);
       }
     } else if (cmd === 'route') {
-      const workKind = flag('--work-kind');
-      const prof = JSON.parse(readIn(a[0]).replace(/^﻿/, ''));
-      const r = route(prof, {workKind, exclude: (flag('--exclude') || '').split(',').filter(Boolean), avoid: (flag('--avoid') || '').split(',').filter(Boolean), notEngine: flag('--not-engine')});
-      if (json) console.log(JSON.stringify(r, null, 2));
-      else {
-        console.log(r.choice ? `CHOICE ${r.choice.engine}/${r.choice.model} effort=${r.choice.effort.requested}` : 'NO CANDIDATE');
-        console.log(`  ${r.reason}`);
-        for (const f of r.fallbacks) console.log(`  fallback ${f.engine}/${f.model} (${f.cost}, ${f.capability.source})`);
-        console.log(`  rejected ${r.rejected.length}; receipt ${r.file}`);
+      for(const name of ['--project','--work-kind','--exclude','--avoid','--not-engine']) {
+        const i=a.indexOf(name);if(i>=0&&(a.lastIndexOf(name)!==i||!a[i+1]||a[i+1].startsWith('--')))throw Error('route flag requires one value: '+name);
       }
-      process.exit(r.choice ? 0 : 3);
+      const workKind=flag('--work-kind'), project=flag('--project');
+      if(!project)throw Error('route requires --project');
+      const opts={project,exclude:(flag('--exclude')||'').split(',').filter(Boolean),avoid:(flag('--avoid')||'').split(',').filter(Boolean),notEngine:flag('--not-engine')};
+      if(a.length!==1)throw Error('route requires one profile file');
+      const input=parseSourceJson(readIn(a[0]));
+      const profile=workKind===undefined?input:{...input,workKind};
+      const {result,exitCode}=routeCommand(profile,opts);
+      if(json)console.log(JSON.stringify(result,null,2));
+      else console.log(result.choice ? 'CHOICE '+result.choice.key : 'NO CANDIDATE: '+result.reason);
+      process.exit(exitCode);
     } else if (cmd === 'limit') {
       const model = flag('--model'), reset = flag('--reset'), signal = flag('--signal'), ms = has('--model-scoped');
       if (!a[0] || !signal) throw Error('usage: limit <engine> [--model m] [--reset ISO] --signal "<text>"');

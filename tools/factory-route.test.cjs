@@ -287,20 +287,29 @@ test('authorization is current configured state, not policy, catalog default or 
   } finally { fs.writeFileSync(R.P.bots, bots); fs.rmSync(R.P.policy, {force: true}); }
 });
 
-test('CLI --work-kind overrides the profile and records the resolved tier', () => {
-  const {spawnSync} = require('node:child_process');
-  const profile = path.join(state, 'cli-profile.json');
-  fs.writeFileSync(profile, JSON.stringify({complexity: 'low', workKind: 'implement'}));
-  fs.writeFileSync(R.P.policy, JSON.stringify(tierPolicy()));
+test('CLI --work-kind overrides the profile through authorized schema-2 preflight', () => {
+  const {spawnSync}=require('node:child_process'),base=fs.mkdtempSync(path.join(os.tmpdir(),'route-cli-'));
+  const env={...process.env,FACTORY_HATTERA_HOME:path.join(base,'home'),FACTORY_STATE_DIR:path.join(base,'state'),FACTORY_SESSION_ID:'cli-session'};
   try {
-    const result = spawnSync(process.execPath, [path.join(__dirname, 'factory-route.cjs'), 'route', profile,
-      '--work-kind', 'review', '--json'], {encoding: 'utf8', env: process.env});
-    assert.equal(result.status, 0, result.stderr);
-    const receipt = JSON.parse(result.stdout);
-    assert.equal(receipt.choice.model, 'a-pro');
-    assert.equal(receipt.workKind, 'review');
-    assert.equal(receipt.tier, 'premium');
-  } finally { fs.rmSync(R.P.policy, {force: true}); }
+    const setup=spawnSync(process.execPath,['-e',`
+      const fs=require('node:fs'),path=require('node:path'),R=require(process.argv[1]),L=require(path.join(path.dirname(process.argv[1]),'provider-snapshot.cjs'));
+      const put=(f,v)=>{fs.mkdirSync(path.dirname(f),{recursive:true});fs.writeFileSync(f,JSON.stringify(v));},stat=f=>{const s=fs.statSync(f);return {mtimeMs:s.mtimeMs,size:s.size};},present=value=>({state:'present',value});
+      const key='alpha/a-pro',project='cli-project';
+      put(R.P.config,{instances:{alpha:{driver:'synthetic'}},defaultModelSelection:{instanceId:'alpha',model:'a-pro'}});put(R.P.bots,[]);
+      const file=path.join(R.P.catalogs,'alpha.json'),catalog={default:'a-pro',options:[{id:'a-pro',label:'A Pro'}]};put(file,catalog);
+      put(R.P.policy,{projects:{[project]:{allowlist:[key]}}});put(path.join(process.env.FACTORY_STATE_DIR,'project-catalog-history',project+'.json'),{schema:1,engines:{alpha:{lastKeys:[key],retirementGeneration:{[key]:0}}}});
+      const native={schema:1,config:{stat:stat(R.P.config),instances:[{id:'alpha',driver:'synthetic',enabled:true}],defaultSelection:{key,effort:null},newBotSelection:null},bots:{stat:stat(R.P.bots),bots:[]},catalogs:[{id:'alpha',driver:'synthetic',file:present(stat(file)),catalog:present({default:catalog.default,options:[{id:'a-pro'}]})}]};
+      put(path.join(process.env.FACTORY_STATE_DIR,'route-identities.json'),{schema:1,sessionId:'cli-session',capturedAt:new Date(Date.now()-1000).toISOString(),validUntil:new Date(Date.now()+600000).toISOString(),nativeFingerprint:L.fingerprint(native),records:{[key]:{providerId:'synthetic-provider',routeScope:'account/test',sourceRef:'fixtures/operator.json'}}});
+      let source=R.readCurrentSources({project,sessionId:'cli-session',now:Date.now()}),engine=source.inputs.engines[0];const raw=L.resolveModelEvidence({key,engine,modelOption:engine.options[0],routeScope:'account/test',evidence:[],decision:null,preference:null,retired:{isRetired:false,retirementGeneration:0},now:Date.now()}).rawCatalogFingerprint;
+      put(path.join(process.env.FACTORY_STATE_DIR,'provider-evidence.json'),{schema:1,records:[['tier',{nativeTier:'standard',normalized:'worker'}],['price',{currency:'USD',unit:'token',basis:'account',input:1,output:1,cachedInput:0}],['toolUse',true],['contextTokens',32000]].map(([field,value])=>({key,field,value,providerId:'synthetic-provider',routeScope:'account/test',kind:'provider-catalog',status:'observed',confidence:'high',sourceRef:'fixtures/'+field+'.json',observedAt:new Date(Date.now()-1000).toISOString(),validUntil:new Date(Date.now()+600000).toISOString(),catalogFingerprint:raw}))});
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,50);R.takeSnapshot(project);
+    `,path.join(__dirname,'factory-route.cjs')],{env,encoding:'utf8'});
+    assert.equal(setup.status,0,setup.stderr);
+    const profile=path.join(base,'profile.json');fs.writeFileSync(profile,JSON.stringify({slice:'cli-override',complexity:'low',budget:'free-first',workKind:'implement',needs:{toolUse:true,imageInput:false,contextTokens:8000}}));
+    const result=spawnSync(process.execPath,[path.join(__dirname,'factory-route.cjs'),'route',profile,'--project','cli-project','--work-kind','review','--json'],{env,encoding:'utf8'});
+    assert.equal(result.status,0,result.stderr);const receipt=JSON.parse(result.stdout);
+    assert.equal(receipt.choice.model,'a-pro');assert.equal(receipt.profile.workKind,'review');assert.equal(receipt.dispatchAuthorized,true);assert.equal(receipt.providerSnapshot.hash,JSON.parse(fs.readFileSync(receipt.providerSnapshot.path)).hash);
+  } finally {fs.rmSync(base,{recursive:true,force:true});}
 });
 
 test('workspace, new-bot and conversation configured selections each grant only their exact identity', () => {
