@@ -456,6 +456,22 @@ test('project mode: a valid exact approval permits a justified premium choice', 
   assert.ok(r.premiumJustification);
 });
 
+test('project mode: equal-cost tie breaks on observed latency before falling back to key', () => {
+  // Same price (cost-tied), same avoid status (neither avoided), same success rate (3/4 both) -
+  // only observed durationMsPerAttempt differs. 'engA/slow-1' sorts before 'engZ/fast-1' by key,
+  // so a tie-break that ignores latency would wrongly pick the slower one on key alone.
+  const slow = fx('engA/slow-1', {price: px(1, 1)});
+  const fast = fx('engZ/fast-1', {price: px(1, 1)});
+  for (const result of ['ok', 'ok', 'ok', 'broken']) {
+    fs.appendFileSync(R.P.outcomes, JSON.stringify({engine: 'engA', model: 'slow-1', complexity: 'low', result, durationMs: 50000}) + '\n');
+    fs.appendFileSync(R.P.outcomes, JSON.stringify({engine: 'engZ', model: 'fast-1', complexity: 'low', result, durationMs: 500}) + '\n');
+  }
+  const r = routeP([slow, fast], profileFx());
+  assert.equal(r.held, false, r.holdReason);
+  assert.equal(r.costTieGroup.length, 2);
+  assert.equal(r.choice.key, 'engZ/fast-1');
+});
+
 test('project mode: legacy route() without opts.project stays advisory (dispatchAuthorized:false)', () => {
   const r = R.route({slice: 's1', complexity: 'low'});
   assert.equal(r.dispatchAuthorized, false);

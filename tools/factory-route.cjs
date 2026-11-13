@@ -395,15 +395,38 @@ function routeProject(profile, opts) {
       } else if (tieGroup.length === 1) {
         choice = tieGroup[0];
       } else {
-        // Equal-cost tie: existing avoid/reliability scoring breaks it, key is the final tie-break.
+        // Equal-cost tie: existing reliability/latency/avoid scoring breaks it, key is the final tie-break.
+        // Reuses the same failureRate/latency weighting and normalizedPenalty shape as the legacy balancedScore
+        // (cost is excluded here since the tie group already shares one cost rank; including it would double-count).
+        const policy = scoringPolicy(readPolicy());
+        const bw = policy.balanced;
         const observations = new Map();
         for (const o of readJsonl(P.outcomes)) {
           if (o.result === 'limit' || o.result === 'transient') continue;
-          const k = `${o.engine}/${o.model}`, s = observations.get(k) || {runs: 0, ok: 0};
-          s.runs++; if (o.result === 'ok') s.ok++; observations.set(k, s);
+          const k = `${o.engine}/${o.model}`, s = observations.get(k) || {runs: 0, ok: 0, durations: []};
+          s.runs++; if (o.result === 'ok') s.ok++;
+          if (Number.isFinite(o.durationMs) && o.durationMs >= 0) s.durations.push(o.durationMs);
+          observations.set(k, s);
         }
         const avoid = new Set(opts.avoid || []);
-        const rank = c => { const obs = observations.get(c.key); return [avoid.has(c.key.split('/')[0]) ? 1 : 0, obs ? -(obs.ok / obs.runs) : 0, c.key]; };
+        const scale = Math.max(bw.weights.failureRate, bw.weights.latency) || 1;
+        const tieScore = c => {
+          const obs = observations.get(c.key);
+          const durationMsPerAttempt = mean(obs?.durations);
+          const terms = [
+            [bw.weights.failureRate, obs ? 1 - obs.ok / obs.runs : bw.unknownPenalty],
+            [bw.weights.latency, durationMsPerAttempt === null ? bw.unknownPenalty : normalizedPenalty(durationMsPerAttempt, bw.latencyScaleMs)],
+          ];
+          let score = 0, total = 0;
+          for (const [weight, penalty] of terms) {
+            const w = weight / scale;
+            if (!w) continue;
+            total += w;
+            score += (penalty - score) * (w / total);
+          }
+          return score;
+        };
+        const rank = c => [avoid.has(c.key.split('/')[0]) ? 1 : 0, tieScore(c), c.key];
         choice = [...tieGroup].sort((a, b) => { const x = rank(a), y = rank(b); for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return x[i] < y[i] ? -1 : 1; return 0; })[0];
       }
     }
