@@ -2,6 +2,13 @@
 
 Factory releases. `node tools/factory-sync.cjs plan <project>` lists the entries newer than the version a project last synced.
 
+## 1.4.0 (preparation)
+- Schema-2 snapshots separate owner authorization, provider evidence, project decisions and dispatch permission.
+- Worker-first for every work kind; premium needs documented task need and exact owner approval. Unknowns stay held, without timeout or cost fallback permission.
+- Project route/check/audit preserve source freshness, historical proof and planned versus acknowledged actual identity.
+- Local captures and source references are attestations, not authenticated account entitlement; unknown cost/effort stays unknown.
+- Role/render preparation only: combined S6 integration and independent checks remain required. No publishing or live bot sync applied.
+
 ## 1.3.0 (2026-11-12)
 - Policy-only work-kind tiers intersect owner-authorized catalog supply, with explicit empty-tier fallback and configurable observed scoring.
 - Dated OpenCode discovery, explicit free-only response probes and user preference gate.

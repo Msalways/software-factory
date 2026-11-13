@@ -105,11 +105,17 @@ test('mentor release plans role and room updates without changing live fixtures'
   setup();
   const before = JSON.stringify(bots());
   const p = sync.plan('demo');
-  assert.equal(p.factoryVersion, '1.3.0');
-  assert.ok(p.bots.every(b => b.soul.includes('needsUserChoice') && b.soul.includes('opencode-prefer')));
+  assert.equal(p.factoryVersion, '1.4.0');
+  assert.ok(p.bots.every(b => b.soul.includes('needsUserChoice') && b.soul.includes('model-record')));
   assert.ok(p.bots.find(b => b.role === 'lead').soul.includes('slice-brief.md'));
   assert.ok(p.bots.find(b => b.role === 'builder').soul.includes('same check failed twice'));
   assert.ok(p.rooms[0].bulletin.includes('status, decisions and blockers only'));
   assert.equal(JSON.stringify(bots()), before, 'plan must not apply settings');
   assert.ok(fs.readFileSync(path.join(__dirname,'../shared/templates/slice-brief.md'),'utf8').includes('Stuck protocol'));
+});
+
+test('provider snapshot release renders bounded worker-first roles without applying settings',()=>{
+ setup();const before=JSON.stringify(bots()),rooms=fs.readFileSync(path.join(home,'groups.json'),'utf8');const p=sync.plan('demo');
+ for(const b of p.bots){assert.equal(b.soul.split('\n')[0],'<!-- factory:begin role='+b.role+' version=1.4.0 -->');assert.ok(Buffer.byteLength(b.soul,'utf8')<24000);for(const word of ['--profile','check','held','Refuse','documented','owner approval','actual','schema-2'])assert.ok(b.soul.includes(word),b.role+': '+word);assert.ok(!/Request the premium tier|premium for review|premium for orchestration/.test(b.soul));assert.ok(!/gpt-|claude-|beam-free/.test(b.soul));}
+ assert.equal(JSON.stringify(bots()),before);assert.equal(fs.readFileSync(path.join(home,'groups.json'),'utf8'),rooms);assert.equal((fs.readFileSync(path.join(__dirname,'../CHANGELOG.md'),'utf8').match(/^## 1\.4\.0/gm)||[]).length,1);
 });

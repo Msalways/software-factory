@@ -1,10 +1,10 @@
 {
   "id": "software-factory",
-  "release": "1.3.0",
+  "release": "1.4.0",
   "name": "Software Factory",
   "tagline": "Gated multi-bot delivery: design, slice, route by live supply, verify independently, integrate.",
-  "summary": "A four-bot delivery team for existing projects. The Lead plans and slices work, routes each slice to an engine, model and effort chosen from live supply (nothing hardcoded), and falls back on usage, session or context limits. The Designer owns DESIGN.md and screenshot reviews, the Builder implements one slice per worktree, and the Verifier checks every done-contract independently. Every gate fails by default and passes only on evidence. The factory standards, templates and Node tools live in the software-factory repository.",
-  "notes": "1.3.0: policy tier routing, OpenCode discovery and user preference, and per-slice execution/usage receipts; sync changes are planned, never applied to live bots automatically.",
+  "summary": "A four-bot delivery team for existing projects. The Lead plans and slices work, routes each slice to an engine, model and effort chosen from live supply (nothing hardcoded), and holds when evidence or permission is insufficient. The Designer owns DESIGN.md and screenshot reviews, the Builder implements one slice per worktree, and the Verifier checks every done-contract independently. Every gate fails by default and passes only on evidence. The factory standards, templates and Node tools live in the software-factory repository.",
+  "notes": "1.4.0 preparation: schema-2 provider snapshots, worker-first project routing, exact premium approval, check/audit evidence and explicit trust limitations. No live sync or release applied.",
   "category": "Engineering",
   "author": {"name": "Msalways", "url": "https://github.com/Msalways/software-factory"},
   "license": "All rights reserved",
@@ -12,7 +12,7 @@
   "tags": ["software-factory", "delivery", "multi-agent", "routing", "verification", "design"],
   "outcomes": [
     "Features delivered as small verified slices with evidence for every gate",
-    "Each slice routed to an engine, model and effort chosen from live supply, with automatic fallback on limits",
+    "Each slice routed from current project evidence with explicit permission; unknowns remain held",
     "UI work designed and reviewed against real screenshots",
     "Slice worktrees cleaned up after merge so disk does not fill up"
   ],
