@@ -837,6 +837,7 @@ function checkCommand(args) {
       if(acknowledgement.confirmation!=='provider-ack')abort(6,'requested/default/ledger attribution is not a provider acknowledgement');
       if(acknowledgement.engine+'/'+acknowledgement.model!==row.key)abort(6,'actual execution identity mismatch');
       let receipt;try{receipt=parseSourceJson(fs.readFileSync(acknowledgement.receiptPath,'utf8'));snapshotLib.fingerprint(receipt);}catch{abort(6,'missing or invalid selected-route receipt');}
+      if(!receipt||typeof receipt!=='object'||Array.isArray(receipt))abort(6,'invalid selected-route receipt: expected an object');
       if(receipt.mode!=='project'||receipt.project!==row.project||receipt.dispatchAuthorized!==true||receipt.held||receipt.choice?.key!==row.key||receipt.choice.engine!==acknowledgement.engine||receipt.choice.model!==acknowledgement.model||receipt.profileHash!==row.profileHash||receipt.providerSnapshot?.hash!==snap.hash||receipt.providerSnapshot.observedAt!==snap.observedAt||typeof receipt.providerSnapshot.path!=='string'||path.resolve(receipt.providerSnapshot.path)!==path.resolve(snapshotPath(row.project)))abort(6,'receipt identity/profile/snapshot evidence mismatch');
       row.evidenceRefs=[...new Set([...row.evidenceRefs,acknowledgement.sourceRef,acknowledgement.receiptPath])];
       row.actualConfirmation='provider-ack';
