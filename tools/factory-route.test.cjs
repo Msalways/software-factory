@@ -330,3 +330,134 @@ test('invalid tier policy fails explicitly before writing a route receipt', () =
     }
   } finally { fs.rmSync(R.P.policy, {force: true}); }
 });
+
+// ---------- v2.1 project-mode ranking (opts.project): S3A-capable-ranking.md fixtures ----------------------
+const snapshotLib = require('./provider-snapshot.cjs');
+const FP = Object.fromEntries(['config', 'bots', 'catalogs', 'policy', 'evidence', 'decisions', 'history', 'limits', 'opencode'].map(k => [k, 'a'.repeat(64)]));
+function fx(key, {tier = 'worker', price = null, toolUse = true, imageInput = true, contextTokens = 100000, preferenceRank = null} = {}) {
+  const [engine, model] = key.split('/');
+  return {key, engine, model, authorization: {status: 'allowed', reasons: []}, hierarchy: {value: tier}, priceEvidence: {value: price},
+    capabilities: {toolUse: {value: toolUse}, imageInput: {value: imageInput}, contextTokens: {value: contextTokens}},
+    decisionState: {preferenceRank}};
+}
+function px(input, output, cachedInput = null, extra = {}) {
+  return {currency: 'USD', unit: 'per-1k-tokens', basis: 'api-equivalent', contextBand: null, serviceTier: null, input, output, cachedInput, ...extra};
+}
+function snapshotFx(models, {nowMs = Date.now(), activeLimits = []} = {}) {
+  const observedAt = new Date(nowMs - 1000).toISOString(), expiresAt = new Date(nowMs + 3600e3).toISOString();
+  const content = {schema: 2, project: 'p3a', observedAt, expiresAt, evidenceExpiresAt: null, maxAgeMinutes: 60, catalogStaleHours: 24,
+    sources: {}, engines: [], models, allowed: models.filter(m => m.authorization.status === 'allowed').map(m => m.key),
+    catalogModelsOmitted: 0, currentFingerprints: FP, capabilityPolicy: {minOutcomes: 2, minSuccessRate: 0.7}, activeLimits, retired: {}};
+  return {...content, hash: snapshotLib.fingerprint(content)};
+}
+function profileFx(overrides = {}) {
+  return {slice: 's3a', workKind: 'implement', complexity: 'low', budget: 'free-first',
+    needs: {toolUse: true, imageInput: false, contextTokens: 8000}, ...overrides};
+}
+function routeP(models, profile, opts = {}) {
+  const nowMs = Date.now();
+  return R.route(profile, {project: 'p3a', snapshot: snapshotFx(models, {nowMs, activeLimits: opts.activeLimits}),
+    context: {now: nowMs, ...opts.context}, avoid: opts.avoid});
+}
+
+test('project mode: cheaper capable worker wins despite premium role and balanced weights', () => {
+  const premium = fx('engA/premium-1', {tier: 'premium', price: px(10, 20)});
+  const worker = fx('engB/worker-1', {price: px(1, 2)});
+  const profile = profileFx({budget: 'balanced', premiumNeed: {requirementIds: ['r1'], reason: 'needs reasoning',
+    cheaperRejected: [{key: 'engB/worker-1', reason: 'not enough', evidenceRef: 'https://example.test/e'}]}});
+  const approval = {approvedBy: 'user', sourceRef: 'https://example.test/a', keys: ['engA/premium-1'],
+    profileHash: snapshotLib.fingerprint(profile), approvedAt: new Date(Date.now() - 1000).toISOString(), expiresAt: new Date(Date.now() + 3600e3).toISOString()};
+  const r = routeP([premium, worker], profile, {context: {approval}});
+  assert.equal(r.held, false, r.holdReason);
+  assert.equal(r.choice.key, 'engB/worker-1');
+  assert.equal(r.dispatchAuthorized, true);
+});
+
+test('project mode: expensive worker loses on cost', () => {
+  const cheap = fx('engC/cheap-1', {price: px(1, 1)});
+  const pricey = fx('engD/pricey-1', {price: px(5, 5)});
+  const r = routeP([pricey, cheap], profileFx());
+  assert.equal(r.held, false, r.holdReason);
+  assert.equal(r.choice.key, 'engC/cheap-1');
+});
+
+test('project mode: cheaper incapable route excluded, pricier capable route wins', () => {
+  const cheapIncapable = fx('engE/cheap-no-tools', {price: px(1, 1), toolUse: false});
+  const priceyCapable = fx('engF/pricey-tools', {price: px(5, 5)});
+  const r = routeP([cheapIncapable, priceyCapable], profileFx());
+  assert.equal(r.held, false, r.holdReason);
+  assert.equal(r.choice.key, 'engF/pricey-tools');
+  assert.ok(r.rejected.some(x => x.candidate === 'engE/cheap-no-tools' && /known incapable: toolUse/.test(x.reason)));
+});
+
+test('project mode: unknown required capability on the cheapest candidate holds the route', () => {
+  const cheapUnknownCtx = fx('engG/cheap-unknown-ctx', {price: px(1, 1), contextTokens: null});
+  const priceyKnown = fx('engH/pricey-known', {price: px(5, 5)});
+  const r = routeP([cheapUnknownCtx, priceyKnown], profileFx());
+  assert.equal(r.held, true);
+  assert.equal(r.choice, null);
+  assert.match(r.holdReason, /engG\/cheap-unknown-ctx/);
+});
+
+test('project mode: crossing price vectors with no estimate or preference hold the route', () => {
+  const a = fx('engI/cross-a', {price: px(1, 10)});
+  const b = fx('engJ/cross-b', {price: px(5, 2)});
+  const r = routeP([a, b], profileFx());
+  assert.equal(r.held, true);
+  assert.equal(r.costTieGroup.length, 0);
+});
+
+test('project mode: complete estimated-token cost resolves crossing rates', () => {
+  const a = fx('engI/cross-a', {price: px(1, 10)});
+  const b = fx('engJ/cross-b', {price: px(5, 2)});
+  // a: 1*1000 + 10*100 = 2000; b: 5*1000 + 2*100 = 5200 -> a wins despite crossing per-unit rates
+  const r = routeP([a, b], profileFx({estimatedTokens: {input: 1000, output: 100, cachedInput: 0}}));
+  assert.equal(r.held, false, r.holdReason);
+  assert.equal(r.choice.key, 'engI/cross-a');
+});
+
+test('project mode: incomplete estimate and unlike billing basis hold the route', () => {
+  const a = fx('engK/basis-account', {price: px(1, 1, null, {basis: 'account'})});
+  const b = fx('engL/basis-api', {price: px(1, 1, null, {basis: 'api-equivalent'})});
+  const r = routeP([a, b], profileFx()); // no estimatedTokens supplied
+  assert.equal(r.held, true);
+});
+
+test('project mode: project comparative preference orders unknown-price candidates without a dollar claim', () => {
+  const a = fx('engM/pref-a', {price: null, preferenceRank: 0});
+  const b = fx('engN/pref-b', {price: null, preferenceRank: 1});
+  const r = routeP([a, b], profileFx());
+  assert.equal(r.held, false, r.holdReason);
+  assert.equal(r.choice.key, 'engM/pref-a');
+  assert.equal(r.choice.price, null);
+});
+
+test('project mode: no worker, an active limit, two failed outcomes and best-quality budget never auto-promote premium', () => {
+  const premium = fx('engO/premium-only', {tier: 'premium', price: px(10, 20)});
+  const profile = profileFx({budget: 'best-quality', complexity: 'medium'});
+  fs.appendFileSync(R.P.outcomes, JSON.stringify({engine: 'engO', model: 'premium-only', complexity: 'medium', result: 'broken'}) + '\n');
+  fs.appendFileSync(R.P.outcomes, JSON.stringify({engine: 'engO', model: 'premium-only', complexity: 'medium', result: 'broken'}) + '\n');
+  const r = routeP([premium], profile, {activeLimits: [{engine: 'engP', until: new Date(Date.now() + 3600e3).toISOString()}]});
+  assert.equal(r.held, true);
+  assert.equal(r.choice, null);
+  assert.ok(r.rejected.some(x => x.candidate === 'engO/premium-only' && /premium requires documented task need/.test(x.reason)));
+});
+
+test('project mode: a valid exact approval permits a justified premium choice', () => {
+  const premium = fx('engQ/premium-approved', {tier: 'premium', price: px(10, 20)});
+  const profile = profileFx({premiumNeed: {requirementIds: ['r1'], reason: 'needs reasoning depth',
+    cheaperRejected: [{key: 'engQ/cheaper-rejected-ref', reason: 'failed on tool use', evidenceRef: 'https://example.test/evidence'}]}});
+  const approval = {approvedBy: 'user', sourceRef: 'https://example.test/approval', keys: ['engQ/premium-approved'],
+    profileHash: snapshotLib.fingerprint(profile), approvedAt: new Date(Date.now() - 1000).toISOString(), expiresAt: new Date(Date.now() + 3600e3).toISOString()};
+  const r = routeP([premium], profile, {context: {approval}});
+  assert.equal(r.held, false, r.holdReason);
+  assert.equal(r.choice.key, 'engQ/premium-approved');
+  assert.equal(r.dispatchAuthorized, true);
+  assert.ok(r.premiumJustification);
+});
+
+test('project mode: legacy route() without opts.project stays advisory (dispatchAuthorized:false)', () => {
+  const r = R.route({slice: 's1', complexity: 'low'});
+  assert.equal(r.dispatchAuthorized, false);
+  assert.equal(r.mode, undefined);
+});

@@ -299,7 +299,134 @@ function effortFor(engineId, complexity, attempt, policy) {
   i = Math.min(levels.length - 1, i + Math.max(0, (attempt || 1) - 1));
   return {requested: levels[i]};
 }
+// ---------- v2.1 project-mode ranking (opts.project): cheapest task-qualified candidate only, per brief
+// S3A-capable-ranking.md. Legacy route() below stays advisory-only (dispatchAuthorized:false), unchanged.
+function priceVectorKey(price) {
+  return price ? [price.currency, price.unit, price.basis, price.contextBand ?? null, price.serviceTier ?? null].join('|') : null;
+}
+// Dominance: for applicable (both non-null) rate components, no higher anywhere and strictly lower somewhere.
+// A missing component is unknown, not zero, so it is excluded from the comparison rather than assumed free.
+// Returns -1/0/1, or undefined when the pair is not comparable this way (mismatched vector, crossing rates,
+// or no overlapping known component).
+function dominanceCompare(a, b) {
+  if (!a || !b || priceVectorKey(a) !== priceVectorKey(b)) return undefined;
+  let cmp = 0, applicable = false;
+  for (const f of ['input', 'output', 'cachedInput']) {
+    if (a[f] == null || b[f] == null) continue;
+    applicable = true;
+    if (a[f] < b[f]) { if (cmp > 0) return undefined; cmp = -1; }
+    else if (a[f] > b[f]) { if (cmp < 0) return undefined; cmp = 1; }
+  }
+  return applicable ? cmp : undefined;
+}
+function estimatedTotalCost(price, estimatedTokens) {
+  if (!price || !estimatedTokens) return null;
+  let total = 0;
+  for (const f of ['input', 'output', 'cachedInput']) {
+    const tokens = estimatedTokens[f];
+    if (!tokens) continue;
+    if (price[f] == null) return null; // missing rate for a needed component: unknown, not zero
+    total += price[f] * tokens;
+  }
+  return total;
+}
+// Cost comparison between two task-qualified candidates: dominance first, then a complete estimated-token
+// cost (only when the profile supplies validated counts), then a project comparative preferenceRank (orders
+// without claiming a dollar figure). undefined = unresolved (crossing/incomparable/no evidence).
+function compareCost(a, b, profile) {
+  const pa = a.model.priceEvidence.value, pb = b.model.priceEvidence.value;
+  const dom = dominanceCompare(pa, pb);
+  if (dom !== undefined) return dom;
+  if (profile.estimatedTokens) {
+    const ea = estimatedTotalCost(pa, profile.estimatedTokens), eb = estimatedTotalCost(pb, profile.estimatedTokens);
+    if (ea !== null && eb !== null) return ea < eb ? -1 : ea > eb ? 1 : 0;
+  }
+  const ra = a.model.decisionState?.preferenceRank, rb = b.model.decisionState?.preferenceRank;
+  if (Number.isSafeInteger(ra) && Number.isSafeInteger(rb)) return ra < rb ? -1 : ra > rb ? 1 : 0;
+  return undefined;
+}
+// A candidate is a cheapest-or-tied winner only if it is comparably no-worse-than every other relevant
+// candidate; an unresolved (crossing/incomparable) pair blocks both sides from winning, so a held-only
+// candidate is never silently out-ranked by a dearer but fully known one (brief: "do not drop them").
+function cheapestTieGroup(relevant, profile) {
+  const n = relevant.length, cmp = Array.from({length: n}, () => Array(n).fill(0));
+  for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+    const c = compareCost(relevant[i], relevant[j], profile);
+    cmp[i][j] = c; cmp[j][i] = c === undefined ? undefined : -c;
+  }
+  const winners = [];
+  for (let i = 0; i < n; i++) {
+    let ok = true;
+    for (let j = 0; j < n; j++) if (j !== i && (cmp[i][j] === undefined || cmp[i][j] > 0)) { ok = false; break; }
+    if (ok) winners.push(relevant[i]);
+  }
+  return winners;
+}
+// A candidate held only for provider tier or price can still be chosen when the cost comparison itself
+// (dominance/estimate/preference) resolves it as the unique or tied winner — that is what resolves the
+// unknown. A candidate held for capability/outcome reasons is never resolvable this way (brief: "Assert
+// unknown alongside otherwise qualified known worker causes held unless evidence rules it out").
+const RESOLVABLE_HOLD_REASONS = new Set(['provider tier unresolved', 'price evidence unresolved']);
+function routeProject(profile, opts) {
+  const project = opts.project;
+  const context = {now: now(), ...opts.context};
+  const snap = Object.prototype.hasOwnProperty.call(opts, 'snapshot') ? opts.snapshot : loadSnapshot(project);
+  const rejected = [], relevant = [];
+  if (snap) {
+    for (const key of snap.allowed) {
+      const ev = snapshotLib.evaluateTask(snap, key, profile, context);
+      if (ev.decision === 'refused') { rejected.push({candidate: key, reason: ev.reasons.join('; ') || 'refused'}); continue; }
+      relevant.push({key, model: snap.models.find(m => m.key === key), evaluation: ev});
+    }
+  }
+  let held = !snap, holdReason = snap ? null : `no provider snapshot captured for project ${project}; run snapshot first`;
+  let tieGroup = [], choice = null;
+  if (snap && !relevant.length) {
+    held = true; holdReason = 'no task-qualified candidate in snapshot.allowed for this profile (see rejected)';
+  } else if (snap) {
+    tieGroup = cheapestTieGroup(relevant, profile);
+    if (!tieGroup.length) {
+      held = true; holdReason = 'crossing or otherwise incomparable price vectors across relevant candidates; no comparable winner';
+    } else {
+      const unresolvable = tieGroup.filter(c => c.evaluation.decision !== 'allowed' && !c.evaluation.reasons.every(r => RESOLVABLE_HOLD_REASONS.has(r)));
+      if (unresolvable.length) {
+        held = true;
+        holdReason = `held candidate cannot be ruled out of the cheapest-or-tied group: ${unresolvable.map(c => `${c.key} (${c.evaluation.reasons.join('; ')})`).join('; ')}`;
+      } else if (tieGroup.length === 1) {
+        choice = tieGroup[0];
+      } else {
+        // Equal-cost tie: existing avoid/reliability scoring breaks it, key is the final tie-break.
+        const observations = new Map();
+        for (const o of readJsonl(P.outcomes)) {
+          if (o.result === 'limit' || o.result === 'transient') continue;
+          const k = `${o.engine}/${o.model}`, s = observations.get(k) || {runs: 0, ok: 0};
+          s.runs++; if (o.result === 'ok') s.ok++; observations.set(k, s);
+        }
+        const avoid = new Set(opts.avoid || []);
+        const rank = c => { const obs = observations.get(c.key); return [avoid.has(c.key.split('/')[0]) ? 1 : 0, obs ? -(obs.ok / obs.runs) : 0, c.key]; };
+        choice = [...tieGroup].sort((a, b) => { const x = rank(a), y = rank(b); for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return x[i] < y[i] ? -1 : 1; return 0; })[0];
+      }
+    }
+  }
+  const receipt = {
+    mode: 'project', project, slice: profile.slice || null, decidedAt: new Date(context.now).toISOString(),
+    supplyObservedAt: snap?.observedAt ?? null,
+    profile: {complexity: profile.complexity, budget: profile.budget, needs: profile.needs, attempt: profile.attempt || 1},
+    choice: choice ? {engine: choice.key.split('/')[0], model: choice.key.slice(choice.key.indexOf('/') + 1), key: choice.key,
+      price: choice.model.priceEvidence.value, tier: choice.model.hierarchy.value} : null,
+    held, holdReason, needsUserChoice: held,
+    relevantCandidates: relevant.map(c => ({candidate: c.key, decision: c.evaluation.decision, reasons: c.evaluation.reasons,
+      price: c.model.priceEvidence.value, tier: c.model.hierarchy.value, preferenceRank: c.model.decisionState?.preferenceRank ?? null})),
+    costTieGroup: tieGroup.map(c => c.key),
+    rejected,
+    dispatchAuthorized: Boolean(choice) && !held,
+    premiumJustification: choice ? choice.evaluation.premiumJustification : null,
+    reason: choice ? `cheapest task-qualified candidate for ${profile.complexity}/${profile.budget}: ${choice.key}` : (holdReason || 'held'),
+  };
+  return receipt;
+}
 function route(profile, opts = {}) {
+  if (opts.project) return routeProject(profile, opts);
   const policy = scoringPolicy(readPolicy());
   const COST_RANK = policy.costRank;
   const snap = opts.snapshot || supply();
@@ -461,6 +588,7 @@ function route(profile, opts = {}) {
   receipt.usage = {inputTokens: null, outputTokens: null, promptBytes: null, source: 'unreported'};
   receipt.handoffs = 0; receipt.mentorQuestions = 0; receipt.escalations = []; receipt.outcome = null;
   receipt.timestamps = {createdAt: receipt.decidedAt, updatedAt: receipt.decidedAt, closedAt: null};
+  receipt.dispatchAuthorized = false; // legacy advisory ranking never grants dispatch (v2.1 project mode is separate)
   fs.mkdirSync(P.receipts, {recursive: true});
   const f = path.join(P.receipts, `${(profile.slice || 'adhoc').replace(/[^\w.-]/g, '_')}-${Date.now()}-${require('node:crypto').randomUUID()}.json`);
   fs.writeFileSync(f, JSON.stringify(receipt, null, 2)); receipt.file = f;
