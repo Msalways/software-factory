@@ -6,6 +6,7 @@
 //   supply   [--json]                         snapshot of engines/models/evidence -> state/routing/supply.json
 //   allowlist <project> (--add e/m,... --source text | --remove e/m,... | --show)
 //   snapshot <project> [--team-setup file|-] [--captured-at ISO] [--evidence file] [--json]
+//   check <project> <engine/model> --purpose native-delegation|cli-run|route|verify --profile file [--actual file] [--json]
 //   route    <profile.json> --project <project> [--work-kind kind] [--exclude e/m,..] [--avoid engine,..] [--not-engine e] [--json]
 //                                             ranked candidates + routing receipt -> state/routing/receipts/
 //   limit    <engine> [--model m] [--reset ISO] [--model-scoped] --signal "<text>"  record a limit event
@@ -745,12 +746,19 @@ const IDENTITY_HOLD_PATTERNS = [
 ];
 const isIdentityHold = message => IDENTITY_HOLD_PATTERNS.some(p => p.test(message));
 
-// CLI permission boundary: fresh independently read source hashes, never a saved map as current truth.
-function routeCommand(profile,opts) {
-  const project=projectId(opts.project), nonempty=v=>typeof v==='string'&&v.trim();
+function validateTaskProfile(profile) {
+  const nonempty=v=>typeof v==='string'&&v.trim();
   snapshotLib.fingerprint(profile); // Reject unsafe/non-JSON fields before any route can be authorized.
   if(!profile||!nonempty(profile.slice)||!nonempty(profile.workKind)||!LEVELS.includes(profile.complexity)||!['free-first','balanced','best-quality'].includes(profile.budget)||!profile.needs||typeof profile.needs.toolUse!=='boolean'||typeof profile.needs.imageInput!=='boolean'||!Number.isSafeInteger(profile.needs.contextTokens)||profile.needs.contextTokens<0)throw Error('invalid task profile');
   if(profile.estimatedTokens!==undefined&&(!profile.estimatedTokens||!['input','output','cachedInput'].every(k=>Number.isSafeInteger(profile.estimatedTokens[k])&&profile.estimatedTokens[k]>=0)))throw Error('invalid estimated token counts');
+}
+
+function validProjectSnapshot(snap,source,project,time) { return !(!snap||snap.project!==project||!Array.isArray(snap.allowed)||!Array.isArray(snap.models)||new Set(snap.allowed).size!==snap.allowed.length||snap.allowed.some(k=>!source.inputs.configured.includes(k)||!source.inputs.allowlist.some(a=>(typeof a==='string'?a:a.id)===k)||!source.inputs.engines.some(e=>e.options.some(o=>e.id+'/'+o.id===k)))||!snapshotLib.isFresh(snap,time,source.currentFingerprints)); }
+
+// CLI permission boundary: fresh independently read source hashes, never a saved map as current truth.
+function routeCommand(profile,opts) {
+  const project=projectId(opts.project);
+  validateTaskProfile(profile);
   const base={mode:'project',project,slice:profile.slice,profile,profileHash:snapshotLib.fingerprint(profile),providerSnapshot:{path:snapshotPath(project),hash:null,observedAt:null},choice:null,dispatchAuthorized:false,held:false,needsUserChoice:false,candidates:[],exclusions:[],costOrder:null,premiumJustification:null,unknowns:[],fallbacks:[],actual:{engine:null,model:null,effort:null,confirmedBy:'unconfirmed'}};
   const failed=(code,reason)=>({exitCode:code,result:{...base,reason,held:code===8,needsUserChoice:code===8}});
   let source;
@@ -758,7 +766,7 @@ function routeCommand(profile,opts) {
   catch(error){return failed(isIdentityHold(error.message)?8:2,error.message);}
   const snap=loadSnapshot(project);
   if(snap)base.providerSnapshot={path:snapshotPath(project),hash:snap.hash??null,observedAt:snap.observedAt??null};
-  if(!snap||snap.project!==project||!Array.isArray(snap.allowed)||!Array.isArray(snap.models)||new Set(snap.allowed).size!==snap.allowed.length||snap.allowed.some(k=>!source.inputs.configured.includes(k)||!source.inputs.allowlist.some(a=>(typeof a==='string'?a:a.id)===k)||!source.inputs.engines.some(e=>e.options.some(o=>e.id+'/'+o.id===k)))||!snapshotLib.isFresh(snap,now(),source.currentFingerprints))return failed(5,'invalid/missing/expired/changed provider snapshot; run snapshot explicitly');
+  if(!validProjectSnapshot(snap,source,project,now()))return failed(5,'invalid/missing/expired/changed provider snapshot; run snapshot explicitly');
   let outcomes=[];
   try{outcomes=fs.readFileSync(P.outcomes,'utf8').split(/\r?\n/).filter(x=>x.trim()).map(parseSourceJson);}
   catch(error){if(error.code!=='ENOENT')return failed(2,error.message);}
@@ -784,6 +792,71 @@ function routeCommand(profile,opts) {
   return {result,exitCode:r.choice?0:r.profileInvalid?2:r.noCapableCandidate?3:8};
 }
 
+// One audit append per parsed check invocation, including argument/profile/preflight failures.
+function checkCommand(args) {
+  const row={at:new Date().toISOString(),project:args[0]??null,key:args[1]??null,purpose:null,actor:process.env.FACTORY_ACTOR_ID||null,decision:'invalid',reasons:[],snapshotHash:null,profileHash:null,evidenceRefs:[],premiumJustification:null,actualConfirmation:'unknown'};
+  const abort=(code,message)=>{const reasons=Array.isArray(message)?message:[message];throw Object.assign(Error(reasons.join('; ')),{checkExitCode:code,checkReasons:reasons});};
+  let exitCode=2,providerSnapshot=null,actual=null;
+  const limitations=['User/operator confirmation markers and source references are attestations, not authenticated provider/account proof.'];
+  try {
+    const rest=args.slice(2),options={};
+    for(let i=0;i<rest.length;i+=2){const flag=rest[i];if(!['--purpose','--profile','--actual'].includes(flag)||Object.hasOwn(options,flag)||!rest[i+1]||rest[i+1].startsWith('--'))abort(2,'invalid check arguments');options[flag]=rest[i+1];}
+    row.purpose=options['--purpose']??null;
+    projectId(row.project);
+    if(typeof row.key!=='string'||!/^[^/\s]+\/\S+$/.test(row.key))abort(2,'check requires engine/model key');
+    const decoded=decodeURIComponent(row.key);if(decoded.includes('\\')||decoded.split('/').some(p=>!p||['.','..','__proto__','constructor','prototype'].includes(p)))abort(2,'unsafe check identity');
+    if(!['native-delegation','cli-run','route','verify'].includes(row.purpose)||!options['--profile'])abort(2,'check requires --purpose and --profile');
+    if(row.purpose!=='verify'&&options['--actual'])abort(2,'--actual is only valid for verify');
+    let profile;try{profile=parseSourceJson(fs.readFileSync(options['--profile'],'utf8'));}catch{abort(2,'missing or invalid profile JSON');}
+    row.profileHash=snapshotLib.fingerprint(profile);validateTaskProfile(profile);
+    let source;
+    try{source=readCurrentSources({project:row.project,sessionId:process.env.FACTORY_SESSION_ID,now:now()});}
+    catch(error){abort(isIdentityHold(error.message)?8:2,error instanceof SyntaxError?'malformed current source JSON':error.message);}
+    const snap=loadSnapshot(row.project);
+    row.snapshotHash=typeof snap?.hash==='string'&&/^[a-f0-9]{64}$/.test(snap.hash)?snap.hash:null;
+    providerSnapshot={path:snapshotPath(row.project),hash:row.snapshotHash,observedAt:snap?.observedAt??null};
+    if(!validProjectSnapshot(snap,source,row.project,now()))abort(5,'invalid/missing/expired/changed provider snapshot; run snapshot explicitly');
+    let outcomes=[];try{outcomes=fs.readFileSync(P.outcomes,'utf8').split(/\r?\n/).filter(s=>s.trim()).map(parseSourceJson);}catch(error){if(error.code!=='ENOENT')throw error;}
+    const evaluated=snapshotLib.evaluateTask(snap,row.key,profile,{now:now(),currentFingerprints:source.currentFingerprints,outcomes,limits:[...activeLimits().values()],approval:source.preimages.decisions.premiumApprovals[profile.slice]??null});
+    row.premiumJustification=evaluated.premiumJustification;
+    const model=snap.models.find(m=>m.key===row.key),routeRef=source.preimages.config.routeIdentities.value.records[row.key]?.sourceRef;
+    row.evidenceRefs=[...new Set([routeRef,...(model?.hierarchy.sourceRefs??[]),...(model?.priceEvidence.sourceRefs??[]),...Object.values(model?.capabilities??{}).flatMap(c=>c.sourceRefs??[]),row.premiumJustification?.sourceRef].filter(Boolean))];
+    if(evaluated.decision!=='allowed')abort(evaluated.decision==='held'?8:6,evaluated.reasons.length?evaluated.reasons:[evaluated.decision]);
+    if(row.purpose==='verify'){
+      if(!options['--actual'])abort(6,'verify requires provider acknowledgement and a receipt reference');
+      let acknowledgement;
+      try{acknowledgement=parseSourceJson(fs.readFileSync(options['--actual'],'utf8'));}catch(error){if(error.code==='ENOENT')abort(6,'actual acknowledgement file missing');abort(2,'invalid actual envelope JSON');}
+      snapshotLib.fingerprint(acknowledgement);
+      if(!acknowledgement||typeof acknowledgement!=='object'||Array.isArray(acknowledgement))abort(2,'invalid actual envelope');
+      acknowledgement={effort:null,...acknowledgement};
+      const fields=['engine','model','effort','sourceRef','receiptPath','confirmation'];
+      if(JSON.stringify(Object.keys(acknowledgement).sort())!==JSON.stringify(fields.sort())||!['engine','model','sourceRef','receiptPath'].every(k=>typeof acknowledgement[k]==='string'&&acknowledgement[k].trim())||!(acknowledgement.effort===null||typeof acknowledgement.effort==='string'&&acknowledgement.effort.trim())||!['provider-ack','unknown'].includes(acknowledgement.confirmation))abort(2,'invalid typed actual envelope');
+      if(/[\r\n]/.test(acknowledgement.sourceRef)||acknowledgement.sourceRef.split(/[\\/]/).includes('..'))abort(2,'invalid acknowledgement source reference');
+      if(/^https:/i.test(acknowledgement.sourceRef)){const u=new URL(acknowledgement.sourceRef);if(u.username||u.password||[...u.searchParams.keys()].some(k=>/key|secret|password|credential|token/i.test(k)))abort(2,'credential-bearing acknowledgement reference');}
+      else if(/^[a-z][a-z\d+.-]*:/i.test(acknowledgement.sourceRef)&&!/^[a-z]:[\\/]/i.test(acknowledgement.sourceRef))abort(2,'acknowledgement reference must be HTTPS or a local artifact');
+      if(acknowledgement.confirmation!=='provider-ack')abort(6,'requested/default/ledger attribution is not a provider acknowledgement');
+      if(acknowledgement.engine+'/'+acknowledgement.model!==row.key)abort(6,'actual execution identity mismatch');
+      let receipt;try{receipt=parseSourceJson(fs.readFileSync(acknowledgement.receiptPath,'utf8'));snapshotLib.fingerprint(receipt);}catch{abort(6,'missing or invalid selected-route receipt');}
+      if(receipt.mode!=='project'||receipt.project!==row.project||receipt.dispatchAuthorized!==true||receipt.held||receipt.choice?.key!==row.key||receipt.choice.engine!==acknowledgement.engine||receipt.choice.model!==acknowledgement.model||receipt.profileHash!==row.profileHash||receipt.providerSnapshot?.hash!==snap.hash||receipt.providerSnapshot.observedAt!==snap.observedAt||typeof receipt.providerSnapshot.path!=='string'||path.resolve(receipt.providerSnapshot.path)!==path.resolve(snapshotPath(row.project)))abort(6,'receipt identity/profile/snapshot evidence mismatch');
+      row.evidenceRefs=[...new Set([...row.evidenceRefs,acknowledgement.sourceRef,acknowledgement.receiptPath])];
+      row.actualConfirmation='provider-ack';
+      if(acknowledgement.effort===null)limitations.push('Applied effort was not acknowledged and remains unknown.');
+      actual=acknowledgement;
+    }
+    try{source.revalidate(now());}catch(error){abort(isIdentityHold(error.message)?8:5,error.message);}
+    if(!validProjectSnapshot(snap,source,row.project,now()))abort(5,'provider snapshot expired during check');
+    exitCode=0;row.decision='permitted';
+  } catch(error) {
+    exitCode=error.checkExitCode??2;row.decision=exitCode===8?'held':exitCode===6?'refused':'invalid';row.reasons=error.checkReasons??[error.message];
+    // A supplied claim is not confirmed when later checks fail.
+    row.actualConfirmation='unknown';
+  }
+  const log=path.join(STATE,'model-decisions.jsonl');
+  // No permitted output can precede this single append. Failure propagates to the nonzero CLI handler.
+  append(log,row);
+  return {exitCode,result:{...row,permitted:exitCode===0,dispatchAuthorized:exitCode===0&&row.purpose!=='verify',providerSnapshot,actual,limitations,log}};
+}
+
 // ---------- CLI
 if (require.main === module) {
   const a = process.argv.slice(2);
@@ -793,7 +866,11 @@ if (require.main === module) {
   const json = has('--json');
   const cmd = a.shift();
   try {
-    if (cmd === 'evidence-import' || cmd === 'model-record') {
+    if (cmd === 'check') {
+      const {result,exitCode}=checkCommand(a);
+      if(json)console.log(JSON.stringify(result,null,2));else console.log(result.decision+': '+result.reasons.join('; '));
+      process.exit(exitCode);
+    } else if (cmd === 'evidence-import' || cmd === 'model-record') {
       const file=flag('--file'),project=cmd==='model-record'?a.shift():process.env.FACTORY_PROJECT_ID;
       if(a.length)throw Error('unexpected record arguments');
       console.log(JSON.stringify(recordProviderInput(cmd,project,file)));
