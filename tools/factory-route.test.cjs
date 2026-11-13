@@ -439,6 +439,13 @@ test('project mode: project comparative preference orders unknown-price candidat
   assert.equal(r.held, false, r.holdReason);
   assert.equal(r.choice.key, 'engM/pref-a');
   assert.equal(r.choice.price, null);
+  // S3B rework2: owner rank is advisory ordering only; it grants no launch permission (check is the gate).
+  assert.equal(r.dispatchAuthorized, false);
+  assert.equal(r.advisory, true);
+  assert.match(r.reason, /ADVISORY/);
+  assert.match(r.reason, /price evidence unresolved/);
+  assert.match(r.reason, /check passes/);
+  assert.deepEqual(r.advisoryReasons, ['price evidence unresolved']);
 });
 
 test('project mode: no worker, an active limit, two failed outcomes and best-quality budget never auto-promote premium', () => {
@@ -553,6 +560,41 @@ test('S3B documented exception: valid owner comparative order may rank while ind
   const r = R.route(profile, {project: 'p3a', snapshot: snap, context: {now: nowMs}});
   assert.equal(r.choice.key, b.key);
   assert.equal(r.choice.price, null);
-  // Limitation: dispatchAuthorized is true here (S3A contract); check on the same model still exits 8.
-  assert.equal(r.dispatchAuthorized, true);
+  // S3B rework2: ranking only; dispatch is never authorized while check on the chosen model holds.
+  assert.equal(r.dispatchAuthorized, false);
+  assert.equal(r.held, false);
+});
+
+// Structural invariant: dispatchAuthorized===true implies check (evaluateTask, shared by every check purpose) allows the chosen candidate.
+const INV_CASES = {
+  'owner ordering': [[fx('engE/a', {price: null, preferenceRank: 1}), fx('engF/b', {price: null, preferenceRank: 0})], {}],
+  'owner ordering, one unranked': [[fx('engE/a', {price: null, preferenceRank: 1}), fx('engF/b', {price: null})], {}],
+  'partial vector': [[fx('engE/a', {price: px(1, null)}), fx('engF/b', {price: px(2, 2)})], {}],
+  'partial vector ranked': [[fx('engE/a', {price: px(null, 1), preferenceRank: 1}), fx('engF/b', {price: px(null, 2), preferenceRank: 0})], {}],
+  'unknown tier': [[fx('engE/a', {tier: 'unknown', price: px(1, 1)}), fx('engF/b', {price: px(2, 2)})], {}],
+  'unknown tier ranked': [[fx('engE/a', {tier: 'unknown', price: px(1, 1), preferenceRank: 0}), fx('engF/b', {price: px(2, 2), preferenceRank: 1})], {}],
+  'premium only': [[fx('engD8/prem', {tier: 'premium', price: px(1, 1)})], {}],
+  'premium with worker': [[fx('engD8/prem', {tier: 'premium', price: px(1, 1)}), fx('engF/b', {price: px(2, 2)})], {}],
+  'all resolved': [[fx('engE/a', {price: px(1, 1)}), fx('engF/b', {price: px(2, 2)})], {}],
+};
+for (const [name, [models, extra]] of Object.entries(INV_CASES)) test('S3B invariant: route dispatchAuthorized implies check allows chosen candidate: ' + name, () => {
+  const nowMs = Date.now(), profile = profileFx(extra), snap = snapshotFx(models, {nowMs});
+  const r = R.route(profile, {project: 'p3a', snapshot: snap, context: {now: nowMs}});
+  if (r.dispatchAuthorized === true) {
+    assert.ok(r.choice, name);
+    assert.equal(snapshotLib.evaluateTask(snap, r.choice.key, profile, {now: nowMs}).decision, 'allowed', name);
+  }
+  if (r.choice) {
+    const ev = snapshotLib.evaluateTask(snap, r.choice.key, profile, {now: nowMs});
+    assert.equal(r.dispatchAuthorized, ev.decision === 'allowed' && !r.held, name);
+    assert.equal(r.advisory, ev.decision !== 'allowed', name);
+  } else assert.equal(r.dispatchAuthorized, false, name);
+});
+test('S3B invariant: owner-ordering is ranked advisory while partial vector, unknown tier and premium never authorize unsafely', () => {
+  const nowMs = Date.now(), run = ms => { const p = profileFx(), sn = snapshotFx(ms, {nowMs}); return R.route(p, {project: 'p3a', snapshot: sn, context: {now: nowMs}}); };
+  const o = run(INV_CASES['owner ordering'][0]);
+  assert.equal(o.choice.key, 'engF/b'); assert.equal(o.dispatchAuthorized, false); assert.equal(o.advisory, true);
+  assert.equal(run(INV_CASES['partial vector'][0]).dispatchAuthorized, false);
+  assert.equal(run(INV_CASES['unknown tier'][0]).dispatchAuthorized, false);
+  assert.equal(run(INV_CASES['all resolved'][0]).dispatchAuthorized, true);
 });

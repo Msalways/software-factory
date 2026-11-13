@@ -459,9 +459,13 @@ function routeProject(profile, opts) {
       price: c.model.priceEvidence.value, tier: c.model.hierarchy.value, preferenceRank: c.model.decisionState?.preferenceRank ?? null})),
     costTieGroup: tieGroup.map(c => c.key),
     rejected,
-    dispatchAuthorized: Boolean(choice) && !held,
+    // A choice whose own evaluation is not 'allowed' (owner-rank over an unresolved price) is a ranking recommendation only:
+    // check (evaluateTask) still holds it, so route must never grant launch permission for it.
+    dispatchAuthorized: Boolean(choice) && !held && choice.evaluation.decision === 'allowed',
+    advisory: Boolean(choice) && choice.evaluation.decision !== 'allowed',
+    advisoryReasons: choice && choice.evaluation.decision !== 'allowed' ? choice.evaluation.reasons : [],
     premiumJustification: choice ? choice.evaluation.premiumJustification : null,
-    reason: choice ? `cheapest task-qualified candidate for ${profile.complexity}/${profile.budget}: ${choice.key}` : (holdReason || 'held'),
+    reason: choice ? `cheapest task-qualified candidate for ${profile.complexity}/${profile.budget}: ${choice.key}` + (choice.evaluation.decision !== 'allowed' ? ` -- ADVISORY ranking only (owner preferenceRank); unresolved: ${choice.evaluation.reasons.join('; ')}; dispatch is NOT authorized until check passes (validated estimate or other resolution)` : '') : (holdReason || 'held'),
   };
   return receipt;
 }
