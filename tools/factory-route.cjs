@@ -308,11 +308,15 @@ function priceVectorKey(price) {
   return price ? [price.currency, price.unit, price.basis, price.contextBand ?? null, price.serviceTier ?? null].join('|') : null;
 }
 // Dominance: for applicable (both non-null) rate components, no higher anywhere and strictly lower somewhere.
-// A missing component is unknown, not zero, so it is excluded from the comparison rather than assumed free.
+// A missing required component is unknown, not zero: the pair is incomparable, never assumed free or skipped.
 // Returns -1/0/1, or undefined when the pair is not comparable this way (mismatched vector, crossing rates,
-// or no overlapping known component).
+// or an unknown required input/output rate).
 function dominanceCompare(a, b) {
   if (!a || !b || priceVectorKey(a) !== priceVectorKey(b)) return undefined;
+  // The required rates (input, output) must be known on BOTH sides: a lower known rate never dominates an
+  // unknown one, which is the same unresolved-price condition evaluateTask holds on. cachedInput is compared
+  // only when both sides publish it (it matters to the evaluator only through an estimate, handled separately).
+  if (a.input == null || b.input == null || a.output == null || b.output == null) return undefined;
   let cmp = 0, applicable = false;
   for (const f of ['input', 'output', 'cachedInput']) {
     if (a[f] == null || b[f] == null) continue;
@@ -367,8 +371,7 @@ function cheapestTieGroup(relevant, profile) {
 }
 // Provider tier is classification, not cost: an unresolved tier is never cleared by cost comparison and always
 // holds, as in check. Unresolved price can be cleared only by an actual comparison (dominance/estimate/
-// owner comparative rank) against at least one other relevant candidate, so a singleton or an unranked pair
-// holds. Capability/outcome holds are never resolvable this way.
+// owner comparative rank) against every other relevant candidate, so a singleton or an unranked pair holds. Capability/outcome holds are never resolvable this way.
 const RESOLVABLE_HOLD_REASONS = new Set(['price evidence unresolved']);
 function routeProject(profile, opts) {
   const project = opts.project;
@@ -398,8 +401,11 @@ function routeProject(profile, opts) {
     if (!tieGroup.length) {
       held = true; holdReason = 'crossing or otherwise incomparable price vectors across relevant candidates; no comparable winner';
     } else {
-      const compared = relevant.length > 1;
-      const unresolvable = tieGroup.filter(c => c.evaluation.decision !== 'allowed' && (!compared || !c.evaluation.reasons.every(r => RESOLVABLE_HOLD_REASONS.has(r))));
+      // A price hold (evaluateTask: unknown input/output rate) is cleared ONLY by a bound owner comparative
+      // preferenceRank against every other relevant candidate; dominance and estimates never clear it, because
+      // evaluateTask (the resolver check uses) holds on the candidate's own price regardless of them.
+      const rankedAgainstAll = c => relevant.length > 1 && relevant.every(o => o === c || (Number.isSafeInteger(c.model.decisionState?.preferenceRank) && Number.isSafeInteger(o.model.decisionState?.preferenceRank)));
+      const unresolvable = tieGroup.filter(c => c.evaluation.decision !== 'allowed' && (!c.evaluation.reasons.every(r => RESOLVABLE_HOLD_REASONS.has(r)) || !rankedAgainstAll(c)));
       if (unresolvable.length) {
         held = true;
         holdReason = `held candidate cannot be ruled out of the cheapest-or-tied group: ${unresolvable.map(c => `${c.key} (${c.evaluation.reasons.join('; ')})`).join('; ')}`;

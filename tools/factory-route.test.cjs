@@ -512,3 +512,47 @@ test('S3B: unknown-tier candidate stays held even when preference ordering ranks
 test('S3B: unresolved-price candidate without estimate or comparative answer holds against a known worker', () => {
   assertHeld(routeP([fx('engV/no-price', {price: null}), fx('engW/priced', {price: px(5, 5)})], profileFx()), /./);
 });
+
+// S3B rework1: partial price vectors never dominate; route verdict equals check's resolver verdict.
+test('S3B: lower known input rate does not dominate an unknown output rate (pair holds, no choice)', () => {
+  const a = fx('engX/partial', {price: px(0.000001, null)}), b = fx('engY/full', {price: px(0.000005, 0.00001)});
+  const r = routeP([a, b], profileFx());
+  assertHeld(r, /./);
+  assert.equal(r.costTieGroup.length, 0);
+  assert.equal(R.route({slice: 's'}).dispatchAuthorized, false);
+});
+test('S3B: complete crossing vectors with a high known output rate hold', () => {
+  assertHeld(routeP([fx('engX/low-in', {price: px(1, 100)}), fx('engY/low-out', {price: px(5, 2)})], profileFx()), /./);
+});
+test('S3B: estimate with a zero token count cannot clear a candidate whose own price is unresolved', () => {
+  const r = routeP([fx('engX/partial', {price: px(1, null)}), fx('engY/full', {price: px(5, 5)})], profileFx({estimatedTokens: {input: 1000, output: 0, cachedInput: 0}}));
+  assertHeld(r, /./);
+});
+// Differential: for single-candidate fixtures route's verdict must equal evaluateTask's (the resolver check uses).
+for (const [name, model, profileExtra] of [
+  ['resolved worker', fx('engD1/ok', {price: px(1, 1)}), {}],
+  ['unknown tier', fx('engD2/t', {tier: 'unknown', price: px(1, 1)}), {}],
+  ['no price', fx('engD3/p', {price: null}), {}],
+  ['partial output price', fx('engD4/po', {price: px(1, null)}), {}],
+  ['partial input price', fx('engD5/pi', {price: px(null, 1)}), {}],
+  ['missing cachedInput rate needed by estimate', fx('engD6/c', {price: px(1, 1, null)}), {estimatedTokens: {input: 10, output: 10, cachedInput: 5}}],
+  ['unknown context capability', fx('engD7/ctx', {price: px(1, 1), contextTokens: null}), {}],
+  ['premium without need', fx('engD8/prem', {tier: 'premium', price: px(1, 1)}), {}],
+]) test('S3B differential: single-candidate route verdict equals check evaluator for ' + name, () => {
+  const nowMs = Date.now(), profile = profileFx(profileExtra), snap = snapshotFx([model], {nowMs});
+  const ev = snapshotLib.evaluateTask(snap, model.key, profile, {now: nowMs});
+  const r = R.route(profile, {project: 'p3a', snapshot: snap, context: {now: nowMs}});
+  assert.equal(Boolean(r.choice), ev.decision === 'allowed', name);
+  assert.equal(r.dispatchAuthorized, ev.decision === 'allowed', name);
+  assert.equal(r.held, ev.decision !== 'allowed' || false, name);
+});
+test('S3B documented exception: valid owner comparative order may rank while individual check stays held', () => {
+  const nowMs = Date.now(), profile = profileFx(), a = fx('engE/a', {price: null, preferenceRank: 1}), b = fx('engF/b', {price: null, preferenceRank: 0});
+  const snap = snapshotFx([a, b], {nowMs});
+  assert.equal(snapshotLib.evaluateTask(snap, b.key, profile, {now: nowMs}).decision, 'held');
+  const r = R.route(profile, {project: 'p3a', snapshot: snap, context: {now: nowMs}});
+  assert.equal(r.choice.key, b.key);
+  assert.equal(r.choice.price, null);
+  // Limitation: dispatchAuthorized is true here (S3A contract); check on the same model still exits 8.
+  assert.equal(r.dispatchAuthorized, true);
+});

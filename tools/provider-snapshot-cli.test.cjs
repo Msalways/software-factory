@@ -178,9 +178,9 @@ test('same catalog content refresh does not change the catalog fingerprint; a su
 });
 // ---------- guarded route CLI (S3): source/snapshot fixtures stay isolated from the user's home.
 const routeProfile=(extra={})=>({slice:'route-s3',workKind:'implement',complexity:'low',budget:'free-first',needs:{toolUse:true,imageInput:false,contextTokens:8000},...extra});
-function routeFixture({qualified=true,limit=false,incapable=false,tier=true,price=true}={}){
+function routeFixture({qualified=true,limit=false,incapable=false,tier=true,price=true,partialPrice=false,dominating=false}={}){
   commandSetup();
-  if(qualified){const e=evidence();e.records=[['tier',{nativeTier:'observed-standard',normalized:'worker'}],['price',{currency:'USD',unit:'token',input:1,output:1,cachedInput:0,basis:'account'}],['toolUse',!incapable],['contextTokens',32000]].filter(([field])=>!(field==='tier'&&!tier)&&!(field==='price'&&!price)).map(([field,value])=>({...e.records[0],field,value,sourceRef:'fixtures/route-'+field+'.json'}));const r=cli('evidence-import',e);assert.equal(r.status,0,r.stderr);}
+  if(qualified){const e=evidence();e.records=[['tier',{nativeTier:'observed-standard',normalized:'worker'}],['price',{currency:'USD',unit:'token',input:1,output:partialPrice?null:1,cachedInput:0,basis:'account'}],['toolUse',!incapable],['contextTokens',32000]].filter(([field])=>!(field==='tier'&&!tier)&&!(field==='price'&&!price)).map(([field,value])=>({...e.records[0],field,value,sourceRef:'fixtures/route-'+field+'.json'}));const r=cli('evidence-import',e);assert.equal(r.status,0,r.stderr);}
   if(limit)write(path.join(state,'limit-events.jsonl'),JSON.stringify({at:new Date().toISOString(),engine:'fixture-engine',model:null,scope:'engine',signal:'fixture account limit',resetAt:new Date(Date.now()+60000).toISOString()})+'\n');
   sleepPastMtimeGranularity();return takeSnapshot(project);
 }
@@ -279,3 +279,11 @@ for(const [name,opts] of [['unknown tier',{tier:false}],['unresolved price',{pri
   const saved=JSON.parse(fs.readFileSync(v.file,'utf8'));assert.equal(saved.dispatchAuthorized,false);assert.equal(saved.choice,null);assert.deepEqual(v.fallbacks,[]);
 });
 test('S3B positive control: resolved tier and price still route with exit0 and permission',()=>{routeFixture();const r=routeCli();assert.equal(r.status,0,r.stderr);const v=JSON.parse(r.stdout);assert.equal(v.dispatchAuthorized,true);assert.equal(JSON.parse(fs.readFileSync(v.file,'utf8')).dispatchAuthorized,true);});
+
+test('S3B partial output price with no estimate or order holds8 in route like check; receipt carries no permission',()=>{
+  routeFixture({partialPrice:true});checked(checkArgs('route'),8);
+  const r=routeCli();assert.equal(r.status,8,r.stderr);const v=JSON.parse(r.stdout);
+  assert.equal(v.dispatchAuthorized,false);assert.equal(v.choice,null);assert.ok(v.unknowns.length);
+  const saved=JSON.parse(fs.readFileSync(v.file,'utf8'));assert.equal(saved.dispatchAuthorized,false);assert.equal(saved.choice,null);
+});
+test('S3B complete resolved price: route 0 and check 0 agree',()=>{routeFixture();checked(checkArgs('route'),0);assert.equal(routeCli().status,0);});
