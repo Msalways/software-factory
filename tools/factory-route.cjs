@@ -914,7 +914,7 @@ function auditUsage(project,section,since=null) {
       fail(snapshot&&typeof snapshot==='object'&&snapshot.schema===2&&snapshot.project===project&&Array.isArray(snapshot.models)&&Array.isArray(snapshot.allowed),'invalid historical snapshot');const {hash,...content}=snapshot;
       fail(hash===ref.hash&&hash===snapshotLib.fingerprint(content)&&snapshot.observedAt===ref.observedAt,'historical snapshot hash/reference mismatch');r.evidence.snapshotHash=hash;
       const start=Date.parse(snapshot.observedAt),end=Date.parse(snapshot.expiresAt),decided=Date.parse(receipt.decidedAt??receipt.timestamps?.createdAt);
-      fail(Number.isFinite(start)&&Number.isFinite(end)&&start<=at&&at<=end&&(snapshot.evidenceExpiresAt==null||at<Date.parse(snapshot.evidenceExpiresAt))&&Number.isFinite(decided)&&decided<=at,'snapshot/receipt not contemporaneous with execution');
+      fail(Number.isFinite(start)&&Number.isFinite(end)&&start<=at&&at<=end&&(snapshot.evidenceExpiresAt==null||at<Date.parse(snapshot.evidenceExpiresAt))&&Number.isFinite(decided)&&start<=decided&&decided<=at,'snapshot/receipt not contemporaneous with execution');
       const m=snapshot.models.find(m=>m.key===r.actualKey);r.authorizationAtRun=snapshot.allowed.includes(r.actualKey)&&m?.authorization?.status==='allowed'?'authorized':'unauthorized';
       r.tierAtRun=['worker','premium'].includes(m?.hierarchy?.value)?m.hierarchy.value:'unknown';
     }catch(error){r.authorizationAtRun='unknown';r.tierAtRun='unknown';r.findings.push('historical proof unknown: '+(error instanceof SyntaxError?'invalid linked JSON':error.code?'linked historical evidence unavailable':error.message));}
