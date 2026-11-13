@@ -119,3 +119,10 @@ test('provider snapshot release renders bounded worker-first roles without apply
  for(const b of p.bots){assert.equal(b.soul.split('\n')[0],'<!-- factory:begin role='+b.role+' version=1.4.0 -->');assert.ok(Buffer.byteLength(b.soul,'utf8')<24000);for(const word of ['--profile','check','held','Refuse','documented','owner approval','actual','schema-2'])assert.ok(b.soul.includes(word),b.role+': '+word);assert.ok(!/Request the premium tier|premium for review|premium for orchestration/.test(b.soul));assert.ok(!/gpt-|claude-|beam-free/.test(b.soul));}
  assert.equal(JSON.stringify(bots()),before);assert.equal(fs.readFileSync(path.join(home,'groups.json'),'utf8'),rooms);assert.equal((fs.readFileSync(path.join(__dirname,'../CHANGELOG.md'),'utf8').match(/^## 1\.4\.0/gm)||[]).length,1);
 });
+
+test('role text does not impose a 24-hour expiry on user answers and states fingerprint binding',()=>{
+ setup();const p=sync.plan('demo');const root=path.join(__dirname,'..');
+ const texts=p.bots.map(b=>[b.role,b.soul]).concat(['hattera/project/lead.md','hattera/project/builder.md','hattera/project/verifier.md','hattera/agents/lead.md','CHANGELOG.md'].map(f=>[f,fs.readFileSync(path.join(root,f),'utf8')]));
+ for(const [n,t] of texts)assert.ok(!/(answers?|confirmations?)[^.\n]{0,40}(24[- ]?hours?|24h)/i.test(t)&&!/(24[- ]?hours?|24h)[^.\n]{0,40}(answers?|confirmations?)/i.test(t),n+': 24-hour user-answer expiry');
+ for(const b of p.bots.filter(b=>b.role==='lead'))for(const w of ['bound to their fingerprint','premium approvals carry their own explicit expiry','ask again'])assert.ok(b.soul.includes(w),b.role+': '+w);
+});
