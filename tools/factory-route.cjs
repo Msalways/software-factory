@@ -6,6 +6,7 @@
 //   supply   [--json]                         snapshot of engines/models/evidence -> state/routing/supply.json
 //   allowlist <project> (--add e/m,... --source text | --remove e/m,... | --show)
 //   snapshot <project> [--team-setup file|-] [--captured-at ISO] [--evidence file] [--json]
+//   audit <project> --section name [--since ISO] [--json]
 //   check <project> <engine/model> --purpose native-delegation|cli-run|route|verify --profile file [--actual file] [--json]
 //   route    <profile.json> --project <project> [--work-kind kind] [--exclude e/m,..] [--avoid engine,..] [--not-engine e] [--json]
 //                                             ranked candidates + routing receipt -> state/routing/receipts/
@@ -76,11 +77,12 @@ function configuredModels() {
   return new Set(selections.filter(s => typeof s?.instanceId === 'string' && s.instanceId && typeof s.model === 'string' && s.model)
     .map(s => `${s.instanceId}/${s.model}`));
 }
-function usageRecords() {
-  let files = [];
-  try { files = fs.readdirSync(P.usage).filter(f => f.endsWith('.jsonl')).sort().slice(-2); } catch {}
-  return files.flatMap(f => readJsonl(path.join(P.usage, f)));
+function usageRecords({details=false}={}) {
+  let all=[];try{all=fs.readdirSync(P.usage).filter(f=>f.endsWith('.jsonl')).sort();}catch(error){if(details&&error.code!=='ENOENT')throw error;}
+  const files=all.slice(-2),records=files.flatMap(f=>details?fs.readFileSync(path.join(P.usage,f),'utf8').split(/\r?\n/).filter(s=>s.trim()).map(parseSourceJson):readJsonl(path.join(P.usage,f)));
+  return details?{records,files,omittedFiles:all.length-files.length}:records;
 }
+
 function supply() {
   const cfg = readJson(P.config, {});
   const instances = Object.entries(cfg.instances || {}).map(([id, v]) => ({id, driver: v.driverKind || v.driver || null}));
@@ -858,6 +860,78 @@ function checkCommand(args) {
   return {exitCode,result:{...row,permitted:exitCode===0,dispatchAuthorized:exitCode===0&&row.purpose!=='verify',providerSnapshot,actual,limitations,log}};
 }
 
+// Historical audit is read-only except its saved report. Current policy is comparison, never at-run proof.
+function auditUsage(project,section,since=null) {
+  projectId(project);const text=v=>typeof v==='string'&&v.trim(),fail=(ok,message)=>{if(!ok)throw Error(message);};
+  fail(text(section),'audit requires --section');const sinceAt=since===null?null:Date.parse(since);
+  if(since!==null)fail(typeof since==='string'&&/^\d{4}-\d{2}-\d{2}(?:$|T)/.test(since)&&Number.isFinite(sinceAt),'invalid --since ISO date');
+  const read=file=>{try{return parseSourceJson(fs.readFileSync(file,'utf8'));}catch(error){if(error instanceof SyntaxError)throw Error('invalid audit JSON source');throw error;}};
+  const optional=file=>{try{return read(file);}catch(error){if(error.code==='ENOENT')return null;throw error;}};
+  const bots=read(P.bots);fail(Array.isArray(bots),'invalid bots source');const byBot=new Map();for(const b of bots){fail(b&&text(b.id)&&!byBot.has(b.id),'invalid/duplicate bot id');byBot.set(b.id,{id:b.id,section:b.section??null});}
+  const raw=readPolicy(),policyPresent=fs.existsSync(P.policy),allowlist=allowlistIds(raw,project),config=optional(P.config);
+  const configured=config===null?null:new Set([config.defaultModelSelection,config.newBotDefaults?.profile?.modelSelection,...bots.flatMap(b=>[b.modelSelection,...(Array.isArray(b.tasks)?b.tasks:[]).map(t=>t.modelSelection)])].filter(s=>text(s?.instanceId)&&text(s?.model)).map(s=>s.instanceId+'/'+s.model));
+  fail(Array.isArray(raw.knownExceptions??[]),'invalid knownExceptions');
+  const scope=usageRecords({details:true}),observed=now(),rows=[],covered=[];let otherSection=0,otherProject=0,beforeSince=0;
+  let receiptIndex=null;
+  function linked(record){
+    if(text(record.receiptPath)){const file=path.resolve(STATE,record.receiptPath);return {file,receipt:read(file)};}
+    const session=text(record.sessionId)?record.sessionId:null,thread=text(record.threadId)?record.threadId:null;
+    if(!session&&!thread)throw Error('no explicit receipt/session link');
+    if(receiptIndex===null){let names=[];try{names=fs.readdirSync(P.receipts).filter(f=>f.endsWith('.json'));}catch(error){if(error.code!=='ENOENT')throw error;}receiptIndex=names.flatMap(name=>{const file=path.join(P.receipts,name);try{const receipt=read(file);return receipt&&typeof receipt==='object'?[{file,receipt}]:[];}catch{return [];}});}
+    const matches=receiptIndex.filter(({receipt:r})=>r.project===project&&(session?(r.sessionId===session||r.session===session):thread&&r.threadId===thread));
+    fail(matches.length===1,matches.length?'ambiguous explicit session link':'no linked session receipt');return matches[0];
+  }
+  const add=(a,b)=>{const v=(a??0)+b;fail(Number.isFinite(v),'audit measurement total overflow');return v;};
+  function summarize(list){
+    const totals={rows:list.length,authorizationAtRun:{authorized:0,unauthorized:0,unknown:0},tierAtRun:{worker:0,premium:0,unknown:0},actualIdentity:{confirmed:0,unknown:0},attribution:{section:0,unknown:0},currentPolicyComparison:{allowlisted:0,notAllowlisted:0,unknown:0},costSources:{reported:{rows:0,usd:null},estimated:{rows:0,usd:null},unreported:{rows:0,usd:null}},tokens:{measuredRows:0,unreportedRows:0,tokensReportedFalse:0,total:null},premiumCoverage:{eligibleRows:0,unknownTierRows:0,unknownActualRows:0,unknownAttributionRows:0,tokens:{eligible:null,premium:null,share:null},reportedCost:{eligible:null,premium:null,share:null},estimatedCost:{eligible:null,premium:null,share:null}}};
+    for(const r of list){totals.authorizationAtRun[r.authorizationAtRun]++;totals.tierAtRun[r.tierAtRun]++;totals.actualIdentity[r.actualKey?'confirmed':'unknown']++;totals.attribution[r.attribution]++;totals.currentPolicyComparison[r.currentPolicyComparison.allowlisted===null?'unknown':r.currentPolicyComparison.allowlisted?'allowlisted':'notAllowlisted']++;
+      const cost=totals.costSources[r.costSource];cost.rows++;if(r.costSource!=='unreported')cost.usd=add(cost.usd,r.costUsd);
+      if(r.measuredTokens===null)totals.tokens.unreportedRows++;else{totals.tokens.measuredRows++;totals.tokens.total=add(totals.tokens.total,r.measuredTokens);}if(r.tokensReported===false)totals.tokens.tokensReportedFalse++;
+      const c=totals.premiumCoverage;if(r.tierAtRun==='unknown')c.unknownTierRows++;if(!r.actualKey)c.unknownActualRows++;if(r.attribution==='unknown')c.unknownAttributionRows++;
+      if(r.actualKey&&r.tierAtRun!=='unknown'&&r.attribution==='section'){c.eligibleRows++;const premium=r.tierAtRun==='premium';for(const [bucket,value] of [['tokens',r.measuredTokens],['reportedCost',r.costSource==='reported'?r.costUsd:null],['estimatedCost',r.costSource==='estimated'?r.costUsd:null]])if(value!==null){c[bucket].eligible=add(c[bucket].eligible,value);c[bucket].premium=add(c[bucket].premium,premium?value:0);}}
+    }
+    for(const bucket of ['tokens','reportedCost','estimatedCost']){const c=totals.premiumCoverage[bucket];c.share=c.eligible>0?c.premium/c.eligible:null;}return totals;
+  }
+  for(const record of scope.records){
+    fail(record&&typeof record==='object'&&!Array.isArray(record),'invalid ledger record');const at=typeof record.at==='string'?Date.parse(record.at):NaN;fail(Number.isFinite(at)&&at<=observed,'invalid/future ledger time');covered.push(at);
+    if(sinceAt!==null&&at<sinceAt){beforeSince++;continue;}if(record.project!==undefined&&record.project!==project){otherProject++;continue;}
+    const bot=byBot.get(record.botId),attributed=bot&&text(bot.section);if(attributed&&bot.section!==section){otherSection++;continue;}
+    const reportedKey=text(record.instanceId)&&text(record.model)?record.instanceId+'/'+record.model:null;
+    const r={at:record.at,botId:typeof record.botId==='string'?record.botId:null,attribution:attributed?'section':'unknown',reportedKey,actualKey:null,authorizationAtRun:'unknown',tierAtRun:'unknown',currentPolicyComparison:null,costSource:'unreported',costUsd:null,tokensReported:record.tokensReported??null,measuredTokens:null,knownExceptionReasons:[],evidence:{receiptPath:null,snapshotPath:null,snapshotHash:null},findings:[]};
+    if(record.costUsd!==null&&record.costUsd!==undefined)fail(typeof record.costUsd==='number'&&Number.isFinite(record.costUsd)&&record.costUsd>=0,'invalid ledger cost');
+    if(record.costSource==='reported'||record.costSource==='estimated')if(record.costUsd!=null){r.costSource=record.costSource;r.costUsd=record.costUsd;}
+    if(record.tokensReported!==false&&Number.isSafeInteger(record.input)&&record.input>=0&&Number.isSafeInteger(record.output)&&record.output>=0&&Number.isSafeInteger(record.input+record.output))r.measuredTokens=record.input+record.output;
+    try{
+      const link=linked(record),receipt=link.receipt;fail(receipt&&typeof receipt==='object'&&!Array.isArray(receipt)&&receipt.project===project,'invalid/foreign linked receipt');r.evidence.receiptPath=link.file;
+      if(text(record.sessionId)&&text(receipt.sessionId??receipt.session))fail(record.sessionId===(receipt.sessionId??receipt.session),'receipt/session link mismatch');
+      if(text(record.threadId)&&text(receipt.threadId))fail(record.threadId===receipt.threadId,'receipt/thread link mismatch');
+      const a=record.actual??receipt.actual,confirmed=a&&text(a.engine)&&text(a.model)&&(a.confirmation==='provider-ack'&&text(a.sourceRef)||typeof a.confirmedBy==='string'&&/^engine:.+/.test(a.confirmedBy));
+      fail(confirmed,'actual execution identity unconfirmed; requested/default/ledger attribution is not acknowledgement');r.actualKey=a.engine+'/'+a.model;
+      fail(!receipt.choice?.key||receipt.choice.key===r.actualKey,'selected/actual identity mismatch');
+      if(reportedKey&&reportedKey!==r.actualKey)r.findings.push('ledger-attributed model differs from acknowledged actual identity');
+      const ref=receipt.providerSnapshot;fail(ref&&text(ref.path)&&text(ref.hash),'no explicit historical snapshot reference');
+      const file=path.resolve(STATE,ref.path),snapshot=read(file);r.evidence.snapshotPath=file;
+      fail(snapshot&&typeof snapshot==='object'&&snapshot.schema===2&&snapshot.project===project&&Array.isArray(snapshot.models)&&Array.isArray(snapshot.allowed),'invalid historical snapshot');const {hash,...content}=snapshot;
+      fail(hash===ref.hash&&hash===snapshotLib.fingerprint(content)&&snapshot.observedAt===ref.observedAt,'historical snapshot hash/reference mismatch');r.evidence.snapshotHash=hash;
+      const start=Date.parse(snapshot.observedAt),end=Date.parse(snapshot.expiresAt),decided=Date.parse(receipt.decidedAt??receipt.timestamps?.createdAt);
+      fail(Number.isFinite(start)&&Number.isFinite(end)&&start<=at&&at<=end&&(snapshot.evidenceExpiresAt==null||at<Date.parse(snapshot.evidenceExpiresAt))&&Number.isFinite(decided)&&decided<=at,'snapshot/receipt not contemporaneous with execution');
+      const m=snapshot.models.find(m=>m.key===r.actualKey);r.authorizationAtRun=snapshot.allowed.includes(r.actualKey)&&m?.authorization?.status==='allowed'?'authorized':'unauthorized';
+      r.tierAtRun=['worker','premium'].includes(m?.hierarchy?.value)?m.hierarchy.value:'unknown';
+    }catch(error){r.authorizationAtRun='unknown';r.tierAtRun='unknown';r.findings.push('historical proof unknown: '+(error instanceof SyntaxError?'invalid linked JSON':error.code?'linked historical evidence unavailable':error.message));}
+    const compared=r.actualKey??reportedKey,decision=raw.projects?.[project]?.modelDecisions?.[compared];
+    r.currentPolicyComparison={key:compared,allowlisted:policyPresent?allowlist.includes(compared):null,configured:configured===null?null:configured.has(compared),tierClaim:['worker','premium'].includes(decision?.tier)?decision.tier:'unknown',tierClaimStatus:'current project answer only; binding not revalidated; never historical proof'};
+    for(const e of raw.knownExceptions??[]){if(!e||!text(e.reason))continue;const keys=['key','botId','receiptPath','sessionId'].filter(k=>e[k]!==undefined);if(!keys.length)continue;const values={key:compared,botId:record.botId,receiptPath:r.evidence.receiptPath,sessionId:record.sessionId};if(keys.every(k=>e[k]===values[k])&&(e.project===undefined||e.project===project)&&(e.from===undefined||Number.isFinite(Date.parse(e.from))&&at>=Date.parse(e.from))&&(e.until===undefined||Number.isFinite(Date.parse(e.until))&&at<=Date.parse(e.until)))r.knownExceptionReasons.push(e.reason);}
+    if(r.attribution==='unknown')r.findings.push('section attribution unknown: bot removed or missing');if(r.authorizationAtRun!=='authorized')r.findings.push('authorization-at-run '+r.authorizationAtRun);if(r.tierAtRun==='unknown')r.findings.push('tier-at-run unknown');if(!r.actualKey)r.findings.push('actual identity unknown');if(r.costSource==='unreported')r.findings.push('cost unreported');if(r.measuredTokens===null)r.findings.push('token telemetry unreported');rows.push(r);
+  }
+  const grouped=new Map();for(const r of rows){const key=JSON.stringify([r.botId,r.actualKey??r.reportedKey,r.attribution]);if(!grouped.has(key))grouped.set(key,[]);grouped.get(key).push(r);}
+  const from=covered.length?new Date(covered.reduce((a,b)=>Math.min(a,b),Infinity)).toISOString():null,to=covered.length?new Date(covered.reduce((a,b)=>Math.max(a,b),-Infinity)).toISOString():null;
+  const report={schema:2,project,observedAt:new Date(observed).toISOString(),coveredRange:{scope:'last-two-ledger-files',files:scope.files,from,to,earlierFilesOmitted:scope.omittedFiles,missingEarlierHistory:scope.omittedFiles>0||sinceAt!==null&&(from===null||sinceAt<Date.parse(from)),completeness:'History outside these files is not established.'},filters:{section,since,otherSectionRowsExcluded:otherSection,otherProjectRowsExcluded:otherProject,beforeSinceRowsExcluded:beforeSince,unknownAttributionIncluded:true},rows,groups:[...grouped.values()].map(list=>({botId:list[0].botId,key:list[0].actualKey??list[0].reportedKey,attribution:list[0].attribution,totals:summarize(list)})),...summarize(rows),dispatchAuthorized:false,findings:rows.flatMap((r,i)=>r.findings.map(reason=>({row:i,reason}))),limitations:['Receipt/session links and engine/provider-ack markers are local attestations, not authenticated provider/account proof.','Current readiness and tier claims do not establish historical authorization or tier.','Only the last two ledger files are covered; unknown/removed section attribution is reported separately and excluded from section premium shares.','Legacy costs without explicit source remain unreported; estimates and subscription-equivalent reported USD are not verified billed charges.']};
+  // Keep rows as the detailed array; totals.rows is its count.
+  report.totals={...summarize(rows)};report.rows=rows;
+  const dir=path.join(STATE,'audits');fs.mkdirSync(dir,{recursive:true});report.file=path.join(dir,project+'-'+observed+'-'+require('node:crypto').randomUUID()+'.json');const temp=report.file+'.tmp';try{fs.writeFileSync(temp,JSON.stringify(report,null,2),{flag:'wx',mode:0o600});fs.renameSync(temp,report.file);}finally{if(fs.existsSync(temp))fs.unlinkSync(temp);}
+  return report;
+}
+
 // ---------- CLI
 if (require.main === module) {
   const a = process.argv.slice(2);
@@ -867,7 +941,14 @@ if (require.main === module) {
   const json = has('--json');
   const cmd = a.shift();
   try {
-    if (cmd === 'check') {
+    if (cmd === 'audit') {
+      for(const name of ['--section','--since']){const i=a.indexOf(name);if(i>=0&&(a.lastIndexOf(name)!==i||!a[i+1]||a[i+1].startsWith('--')))throw Error('audit flag requires one value: '+name);}
+      const section=flag('--section'),since=flag('--since');
+      if(a.length!==1)throw Error('audit requires project --section name [--since ISO]');
+      const result=auditUsage(a[0],section,since??null);
+      if(json)console.log(JSON.stringify(result,null,2));else console.log('AUDIT '+result.project+': '+result.findings.length+' findings; '+result.file);
+      process.exit(result.findings.length?7:0);
+    } else if (cmd === 'check') {
       const {result,exitCode}=checkCommand(a);
       if(json)console.log(JSON.stringify(result,null,2));else console.log(result.decision+': '+result.reasons.join('; '));
       process.exit(exitCode);
