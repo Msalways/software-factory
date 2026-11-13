@@ -1,187 +1,64 @@
-﻿# Dynamic execution: routing, limits and fallback
-Updated: 2026-11-10. Patterns adapted from Bernstein (cheap-first cascade), Claudexor (quota headroom preflight, effort receipt, rotate before/after progress), opencode-swarm (context budget and handoff), Fusion (per-task model precedence) and agent-yes (limit-signal detection).
+# Dynamic execution: evidence, economical routing and held decisions
+Updated: 2026-11-12. Normative contract: `projects/software-factory/features/provider-snapshot/prd.md` v2.1.
 
-Atlas or the project Lead chooses engine, model and effort **per slice, from live data**. Nothing here or in any SOUL or skill names a specific model or assumes something is free. Bot defaults are bootstrap settings, not a router.
+This is the schema-2 target workflow, not a claim that baseline 1.3.0 tools already enforce it. Atlas integrates and independently verifies the implementing slices before rollout. During bootstrap, an explicitly authorized manual preflight must record the same checks and the bounded execution authority. Documentation, a catalog entry, or a passing legacy route cannot authorize dispatch.
 
-## 1. Discover supply (each dispatch)
-- Ready engines and their current models: Hattera's live engine catalog (`~/.openmausbot/providers/engine-models/*.json`). Re-probe the engine itself when an entry is stale or the engine is new. A catalog entry is a hint. A successful run proves the route.
-- For each candidate: effort levels it advertises, image input, context size, current price/free status as the engine reports it now, and recent limit or failure events (`~/.openmausbot/usage/*.jsonl`, slice attempt history).
-- Every value carries an observed time. Unknown stays unknown and is never treated as free or $0.
+## 1. Provider configuration snapshot
+Take a project snapshot at session start, before every dispatch, after relevant settings change, and whenever its source fingerprints change. Reuse is bounded by `snapshot.maxAgeMinutes` (default 60) and the earliest accepted evidence expiry. A schema-1 cache requires regeneration; it is never silently upgraded.
 
-## 2. Route
-1. Filter to candidates that meet the slice's needs (requirements profile in the slice spec) and have quota headroom (section 4).
-2. Rank cheapest-capable first for the complexity and budget class.
-3. Choose effort only from that engine's advertised levels: low complexity → low, medium → medium, cross-cutting or risky → high. A repeated failure escalates one step or changes engine.
-4. Spread parallel slices across engines and accounts so one limit cannot stall everything. Give the verifier a different engine from the builder where one is available.
-5. Write a **routing receipt** in the slice record: the candidates considered, the choice, the reason, effort requested and effort actually applied, and the supply snapshot time.
-6. Mark the slice *running* only once the engine has accepted the execution identity (thread or session ID, engine, model).
+Sources are configured instances and selections from `config.json` and `bots.json`, complete cached engine options, dated sanitized provider evidence, project decisions, retirement history, active limits and a Chief's saved `list_team_setup` capture. No factory command browses, authenticates or launches a model. Never copy secrets into captures, snapshots or evidence.
 
-## 3. How to dispatch today
+`state/routing/snapshots/<project>.json` records schema 2, authorization, evidence resolutions, capabilities, questions and source fingerprints. A fresh snapshot needs valid time bounds, a recomputed full canonical SHA-256 hash and unchanged config/bots/catalogs/policy/evidence/decisions/history/limits/opencode fingerprints. Age alone is insufficient. Catalogs older than `snapshot.catalogStaleHours` (default 24) require a valid current-session live readiness capture. With that capture, catalog age is a warning; without it the stale model is refused. Fresh catalogs without a capture carry readiness unverified.
 
-`balanced` retains eligibility and hard-need filters, then ranks observed attempt
-failure rate (weight 0.5), cost (0.3), and latency (0.2). Cost is normalized as
-dollars / (dollars + 0.01); latency as milliseconds / (milliseconds + 60000).
-Receipts expose weights, scales, scores, sample counts and null missing values.
-Missing observations receive penalty 1; they are never assumed free or instant.
-`free-first` retains price-class priority. Measurements do not authorize routes
-or prove current provider readiness.
+A saved capture is an attestation, not verified origin. Reject invalid/future timestamps and inconsistent captures that list unconfigured choices; ignore expired captures. A configured engine absent from a valid capture is not ready. A capture can confirm readiness but cannot add a model to authorization. A ready flag never overrides an active quota limit.
 
-All scoring defaults live in `tools/route-defaults.json`. Override individual
-`balanced.weights`, `balanced.costScaleUsd`, `balanced.latencyScaleMs`,
-`balanced.unknownPenalty`, `capability.minOutcomes`,
-`capability.minSuccessRate`, or `costRank` keys in `route-policy.json` under
-`FACTORY_STATE_DIR`. Omitted keys inherit the documented JSON defaults. Invalid
-numeric values fail routing; scales must be positive, weights nonnegative with
-at least one positive, success rate within [0,1], minimum outcomes a positive
-integer, and unknown penalty at least 1. Normalization scales are policy tuning
-parameters, not prices claimed for any model. Receipts show resolved values and
-their configuration paths. Model and engine identifiers have no scoring rules.
+## 2. Four separate checks before execution
+1. **Authorized identity:** project owner allowlist AND current configured selection AND catalog membership/freshness/readiness/OpenCode gates. Snapshot `allowed` means authorization only, never task approval. Neither a tier answer nor a provider fact adds authorization.
+2. **Provider tier evidence:** use explicit high-confidence observed provider hierarchy with an evidenced mapping, or a current project user answer. Names, family, marketing headings, effort, prices and aggregator guesses do not establish a tier. Conflicting, expired, future, wrong-provider/account or mismatched evidence remains excluded and visible; unknown stays unknown.
+3. **Capable for this task:** an exact profile requires slice, workKind, complexity, budget and explicit toolUse/imageInput/contextTokens needs. Known incapability refuses; unknown hard capability holds. Apply current outcome thresholds (defaults two outcomes/70% success). Medium/high tasks without qualifying outcomes hold for a smaller authorized pilot or explicit user acceptance of unproven capability. Low-complexity cold starts still need known hard capabilities, tier and current cost permission.
+4. **Permission for this dispatch and cost:** choose the cheapest qualified worker, regardless of work kind or bot role. Premium requires a documented task need AND matching exact per-slice user permission; it is never an automatic role, empty-tier or failed-check fallback.
 
-Free status requires an explicit `priceReported: "free"` catalog field or an
-operator-confirmed cost class in policy. Names and labels do not establish free
-status. Existing catalogs without structured price evidence remain unknown.
+Deterministic refusals precede held decisions: unauthorized/invalid identity, active limit, known incapability and premium without justified need or permission refuse. Otherwise unknown required evidence holds. Missing worker supply is held/no route; do not silently promote to premium. Neither a timeout nor declining a question grants tier, authorization or spend.
 
-Record actual observations using optional `outcome` flags `--cost-usd <dollars>`
-and `--duration-ms <milliseconds>`. Omit unreported values rather than supplying
-zero. These are operator-recorded observations; automatic native execution
-correlation remains unimplemented.
-- **Native teammates:** the receiving bot runs on its own default model, because Hattera's handoff has no per-task model override. Routing natively means choosing the bot whose engine matches the receipt. Chiefs' setup catalog lists only models already chosen on some bot, so an engine with no bot stays invisible until a bot uses it.
-- **Engine CLI in the slice worktree** (when shell access is authorised): for example `opencode.cmd run --model <discovered-provider/model> --format json --file <brief>`. Use a fresh session per independent slice, and resume only that slice's own recorded session. Keep approval boundaries; never use `--auto` to bypass them.
-- Still needed in Hattera: per-task model and effort in delegation, and a full engine catalog for Chiefs.
+## 3. Evidence, fingerprints and cost comparison
+`<STATE>` is `FACTORY_STATE_DIR` or `<factory>/state/routing`. The generic evidence envelope is `<STATE>/provider-evidence.json`: `{schema:1,records:[]}`. Each record supplies exact key/provider/route identity, field and typed value, sourceRef, kind/status/confidence, observation/validity times and a raw catalog binding. Source references and user answers are attestations, not authenticated proof of origin or user identity. Unknown fields stay unknown; no inference probes are permitted for project preflight.
 
-## 3a. Tools (`tools/` in the factory root, Node, no model calls)
-- `node tools/factory-route.cjs supply`: live snapshot of engines, catalogs (with staleness), models that ran here, and models withdrawn from a catalog.
-- `node tools/factory-route.cjs route <profile.json> [--work-kind <kind>] [--not-engine <builder engine>] [--avoid <busy engines>] [--exclude engine/model,...]`: ranked choice, fallbacks and a routing receipt in `state/routing/receipts/`. Exit code 3 means there is no candidate, so mark the slice waiting-for-quota. The profile is `{"slice","complexity":"low|medium|high","budget":"free-first|balanced|best-quality","needs":{"imageInput","contextTokens"},"attempt","workKind"}`. The CLI work kind overrides the profile value.
-- `node tools/factory-route.cjs detect <engine> --model <m> <output-file|->`: classifies output text and records limit signals. These are engine-wide unless `--model-scoped`, and keep any reset time given.
-- `node tools/factory-route.cjs limit <engine> --signal "<text>" [--reset ISO]`: records a limit seen elsewhere, for example a Hattera incident.
-- `node tools/factory-route.cjs outcome <engine> <model> <complexity> <ok|transient|limit|broken|too-big|spec|repeated> --slice <id> --note "<evidence>"`: **record one after every verified slice.** Capability is learned from these records. A model counts as proven at a complexity after at least 2 relevant outcomes with at least 70% success. Unproven or free models are tried on low complexity, and a cold start is labelled in the receipt.
-- `node tools/factory-gates.cjs check <worktree> <evidence.json> --run [--ui]`: the verify gate (artifacts_exist, diff_matches_claims, tests_pass). Exit code 0 only when every gate passes.
-- Editable data: `state/routing/route-policy.json` holds effort levels as engines report them, cost class when the user states it, and overrides. Change only from engine-reported or user-given facts.
+Raw catalog fingerprints bind captures before evidence exists. Resolved catalog fingerprints include normalized retained claims and the complete retirement-generation map. Model answers bind the model content fingerprint and target generation; catalog-scoped answers/preferences bind the resolved catalog. Identical refreshes and display-label changes preserve content identity; substantive capability/price/hierarchy/validity/provider/account changes do not. Excluded and expired claims remain fingerprinted. Never auto-rebind old captures or prune tombstones. Retirement/reappearance cannot revive an old answer; changes entirely between observations remain undetectable. Full projections and validation rules live in the PRD, not a second schema here.
 
-## 4. Limits: quota, session and context
+Price evidence records currency, unit, input/output/cache components, context band, service tier and account versus API-equivalent basis. Unreported components are null, never zero placeholders. API-equivalent prices are not account marginal charges. Compare only compatible vectors: dominance, validated profile estimatedTokens with all applicable rates, or a current catalog-bound user comparative preference. Label estimates as estimates. Unknown components, incompatible bases, crossing vectors or unresolved relevant competitors hold the comparison. Do not discard a held candidate and call a dearer known candidate cheapest. Authorization refusals, active limits and known hard-capability failures can be excluded with evidence. Equal-price ties use existing reliability/latency/avoid rules, then lexicographic key.
 
-### Per-slice receipt updates
-`route` saves the existing routing data plus `planned`, `actual`, `usage`,
-`handoffs`, `mentorQuestions`, `escalations`, `outcome` and `timestamps`.
-Every routing attempt has its own unique receipt file. Legacy files load with
-unknown execution/usage and zero event counters; reading does not rewrite them.
+Legacy balanced/free-first/best-quality advisory scores and their configurable defaults in `tools/route-defaults.json` are compatibility data or secondary tie-breaks. They cannot substitute a measured price vector, bypass the cheapest-capable comparison or approve premium. Missing observations remain null/unknown, not free or instantaneous. No numerical spending cap is introduced here.
 
-Use `node tools/factory-route.cjs receipt <receipt.json> <action> [data]`:
-- `show`: read the receipt, including legacy defaults.
-- `handoff` or `mentor`: increment the corresponding event counter once.
-- `escalate <event.json>`: append `{fromTier,toTier,reason,note}` with server time.
-  Reason must be `check-failed-twice`, `brief-wrong` or `other`; note is required.
-- `report <report.json>`: manually import engine/Hattera-reported evidence. The
-  envelope requires `source` (`engine` or `hattera`), `reference` (the captured
-  event/ledger row pointer), and optional `actual: {engine,model,effort}` or
-  `usage: {inputTokens,outputTokens,promptBytes}`. Never derive actual from planned.
-  Omitted effort stays null. Usage values must be positive reported integers or
-  null; missing measurements use `unreported`, never a zero placeholder. Partial
-  usage records include per-field `sources`; each import replaces the usage
-  snapshot, so provide all known measurements together.
-- `close <passed|failed|split|escalated|abandoned>`: close once. All subsequent
-  writes, including another close, fail. Updates use an exclusive lock and atomic
-  file replacement; a crashed lock requires explicit operator recovery.
+## 3a. Tools and the execution boundary
+These are the integrated schema-2 CLI contracts; verify availability on the deployed revision. Missing/unimplemented guards mean held/manual authorized bootstrap, never a direct-CLI bypass.
+- `node tools/factory-route.cjs supply --json`: research observations, not authorization or provider acknowledgement.
+- `node tools/factory-route.cjs allowlist <project> --add <keys> --source "<user confirmation>"` (or `--remove`/`--show`): authorization only. Add only from the actual user's explicit confirmation; no tier or cost permission follows.
+- `node tools/factory-route.cjs evidence-import --file <file>`: validated local envelope import; no network/model calls. Malformed inputs fail before writes, with old bytes preserved.
+- `node tools/factory-route.cjs model-record <project> --file <answer.json>`: record an actual project user answer as model-decision, premium-approval or opencode-preference. It is an attestation importer, not identity verification or an allowlist editor.
+- `node tools/factory-route.cjs snapshot <project> [--team-setup <file|->] [--captured-at ISO] [--evidence <file>] --json`: schema 2 plus task-relevant held questions. A capture confirms readiness only.
+- `node tools/factory-route.cjs route <profile.json> --project <project> --json`: 0 choice, 3 no capable/quota route, 5 invalid/expired/changed snapshot, 8 held decision; invalid arguments exit 2.
+- `node tools/factory-route.cjs check <project> <engine/model> --purpose <native-delegation|cli-run|route|verify> --profile <file> [--actual <file>] --json`: same task evaluator before native delegation, direct engine CLI work and verification. Exits 0 permitted, 6 refused, 5 bad snapshot, 8 held. Every request logs exactly once in `<STATE>/model-decisions.jsonl`; log-write failure blocks execution.
+- `node tools/factory-route.cjs audit <project> --section <name> [--since ISO] --json`: run at session start. Exits 0 no findings, 7 findings, 2 invalid input. Contemporaneous receipt/session evidence establishes historical authorization/tier; current policy is a separate comparison. Unknown history stays unknown. Reported, estimated and unreported costs remain separate.
+- `node tools/factory-gates.cjs check <worktree> <evidence.json> --run`: builder artifact checks and independent verification on the exact assigned baseline/revision.
 
-Reported evidence sources today: Hattera `server/runtime.ts::bookTurnUsage`
-calls `server/usage-ledger.ts::appendUsage`, writing `<data>/usage/YYYY-MM.jsonl`.
-`UsageRow` exposes instanceId/model, input/output, tokensReported, threadId,
-and optional promptBytes `{stable,volatile}`. Honor tokensReported=false as
-unreported; ledger zero placeholders do not prove measured usage. The ledger's
-model attribution uses configured selections in current runtime branches; it is
-not independent confirmation of the executed model or applied effort. Engine-reported turn/session
-events may confirm model and effort where present. No universal effort-report
-adapter exists here. Prompt bytes may be summed from the reported split only
-when both components are present; never manufacture them from token estimates.
-For example `server/drivers/codex.ts` emits session.started with a model, but
-that field may fall back to the request when the provider omits it. Preserve
-the original provider acknowledgement as evidence; do not promote that fallback
-to confirmed execution. This receipt importer does not decode that distinction.
+The legacy module `route(profile,opts)` without a project is advisory only (`dispatchAuthorized:false` in the reconciled contract). Old ranking callers remain compatible, but they supply no permission for native or CLI execution. All execution paths need the project check and exact profile. No factory command launches a model.
 
-This command is an operator evidence import, not an automatic verifier of the
-reference or payload. Automatic event decoding, ledger ingestion, and correlation
-between a factory slice and Hattera execution remain unimplemented. The existing
-`outcome` command still records capability observations independently; closing a
-receipt does not invent an execution or capability outcome.
+For native handoffs, inspect the recipient route: a default or requested selection is not actual execution confirmation. A mismatched native recipient is a routing blocker, not authority to change a bot. For CLI work, use only the permitted exact route in the owning isolated worktree. Never use auto-approval flags to bypass permissions. No model/account switch inherits permission from a failed or quota-blocked route.
 
-- **Preflight before every dispatch:** check each candidate account's recent limit events and, where readable, its 5-hour and weekly usage windows. Skip candidates without headroom for the slice's size. Treat quota reads older than about 5 minutes as stale.
-- **Limit signals:** typed errors, and CLI or engine output such as "usage limit", "5-hour limit", "session limit", "rate limit", HTTP 429, or 5xx. Record the signal verbatim with its time.
-- **Context budget:** at about 70% of the window, compact or trim the context. At about 90%, write a **continuation packet** and continue in a fresh session.
-- **Continuation packet** (`context.md` in the slice folder): goal and spec pointer, verified progress (revision, checks passed), the diff summary, remaining steps, open risks, and attempt history. The next session works from the packet plus the repository, not the old transcript.
+Verification requires provider-acknowledged actual engine/model, effort where reported, sourceRef, receiptPath and profile/receipt/key agreement. Unknown actual identity or a mismatch refuses the route check. A default, requested route, ledger attribution or successful process exit is insufficient confirmation. Missing effort remains unknown. Current permission/freshness is still required; historical authorization does not approve a new run.
 
-## 5. Fallback
-Classify the failure using gates-and-handoffs.md, then:
-- **Limit before progress:** rotate to the next ranked candidate and start fresh.
-- **Limit after progress:** write the continuation packet and resume on the next ranked candidate.
-- **Transient:** retry once on the same route, with backoff. **Broken route:** mark it bad for this slice and use the next candidate. **Too big:** split the slice.
-- If no candidate has headroom, mark the slice *waiting-for-quota* with the earliest known reset time and continue other slices. Do not stall the whole feature.
-- Never silently move to a **paid** route the user has not authorised. A cost increase is a held decision.
-- Record every fallback in the attempt history.
+## 4. Limits, receipts and recovery
+Preflight records active account/model limits and numeric headroom where reported; unavailable headroom stays unreported. A ready catalog entry does not override a limit. Save verbatim limit signals and reported reset time without assuming a future retry is authorized.
 
-## Observed status (2026-11-04, historical; re-verify before relying on it)
-OpenCode command: `opencode.cmd` in the user's npm global folder. Its run help confirms per-run `--model provider/model#variant`, `--file`, `--format json` and session options. The PowerShell .ps1 launcher was blocked by execution policy, and the .cmd launcher worked. In the sandbox, the CLI needed approved access to write its log outside the task workspace. Hattera setup controls exposed only Codex at that time, which was a catalog limit (above), not proof that OpenCode was unconfigured.
+Snapshot-linked receipts retain profileHash, snapshot path/hash/time, authorization sources, resolution evidence, candidates/exclusions, ordering basis, premium need/approval reference, requested versus acknowledged actual identity, held options and failure class. Usage remains null/unreported when absent. Existing receipt commands can record handoffs, mentor questions, classified escalation notes and terminal outcomes, but an escalation or outcome record grants no permission. Engine reports and Hattera usage ledgers have different attribution guarantees; the latter's configured model and fallback session fields cannot establish provider acknowledgement. Automatic slice/usage correlation is not assumed.
 
-## Mentor and worker routing
+Classify failures using gates-and-handoffs.md. A transient retry uses the same still-valid permitted route only. A quota/broken route is excluded; any replacement goes through fresh authorization, evidence, capability and cost/permission checks. If none passes, remain held/waiting-for-quota; no premium or paid fallback is automatic. After progress, write a continuation packet with exact revision, checks, remaining work and permitted next route. At about 70% context trim/compact; at about 90% checkpoint and stop cleanly. Timeouts and session limits never approve a model or additional spend.
 
-### OpenCode discovery and initial preference
-Run `node tools/factory-route.cjs opencode-discover` before offering OpenCode.
-It writes dated `opencode-discovery.json` under the routing state directory.
-Only explicit free cost metadata permits a tiny response probe; unknown/paid
-models are recorded as skipped. Process exit alone is not a confirmed response.
-Each explicitly free candidate gets a probe with a 10-second timeout. No ranking or
-choice is performed. Empty output is an unverified discovery, never availability.
-`FACTORY_OPENCODE_BIN` selects an installed CLI; JSON arrays in
-`FACTORY_OPENCODE_MODELS_ARGS` and `FACTORY_OPENCODE_RUN_ARGS` accommodate its
-documented flags (for example verbose metadata or disabling external plugins).
-Defaults use the active CLI's `models --standalone` and `run` commands.
+## 5. Mentor/worker and project decisions
+The Lead writes the project-local slice brief. Workers own separate threads/worktrees and ask bounded mentor questions there, retaining implementation ownership. Two failures or a proven wrong brief justify asking for guidance, correction or permission; they never independently approve premium, an effort increase, account switch or takeover. Premium need cites requirementIds, reason and cheaperRejected evidence; the owner approval must match slice, exact keys, profileHash and valid approval interval with sourceRef. A timeout, numerical score or role does not supply that approval.
 
-Before first OpenCode use for a project, or when `needsUserChoice` is true, ask
-the user with the discovered, free, responding options. Use ask_user if mounted;
-otherwise return the question to the requester. Record the answer with
-`node tools/factory-route.cjs opencode-prefer --models <id,id>` using the project's
-routing state directory. The policy stores chosen, askedAt and offered. This is
-preference, never authorization. Reuse it without asking on every dispatch.
-Missing preference, a retired choice, newly responding options, failed discovery
-or discovery older than one day excludes OpenCode and reports the choice needed.
-Only chosen, confirmed, catalog-listed and owner-authorized identities can route.
-Preference only filters identities; it never assigns a tier. Declare each model's
-tier explicitly in models["engine/model"].tier. Missing or different declarations
-are recorded in tierExclusions; an empty requested tier uses explicit fallback.
-No bots or owner configuration are changed by these commands.
+Ask only about task-relevant owner-allowlisted/configured/catalog identities; group questions per project/provider. Offer defer/hold first, then explicit evidence-backed classification or comparative preference. Classification is independent of allowlisting and spending permission. All work kinds consider qualified workers first; no mandatory premium workKindTiers mapping belongs in project policy.
 
-Work kind and model tiers are owner-editable policy data in route-policy.example.json.
-Orchestration, planning, review and explanation request premium; implementation and
-routine verification request worker. These are policy defaults, not model assignments.
-Dispatch intersects the requested tier with live owner-authorized configured catalog
-choices. Unknown observations remain unknown. An empty tier falls back only within
-existing authorization, with the reason recorded; discovery never grants permission.
+Project OpenCode preference uses chosen/offered exact engine/model keys, askedAt, confirmedBy, sourceRef, resolved catalogFingerprint and scope catalog. It consumes local metadata without response probes, cannot assign tier, and is re-asked after substantive catalog/lifecycle changes. Legacy global opencode-prefer and probe-based discovery are historical/advisory only, never project authorization or a reason to launch probes. Known platform-internal exceptions are audit-only and never execution permission.
 
-The router reads `<factory-worktree>/state/routing/route-policy.json`, or
-`<FACTORY_STATE_DIR>/route-policy.json` when that environment variable is set.
-Copy `shared/templates/route-policy.example.json` there and edit
-`workKindTiers` and `models["engine/model"].tier`. Tier names are arbitrary policy
-values. The user policy instance supplied with tier-02a assigns catalog-observed
-models to the user's premium and worker preferences without asserting price,
-readiness or capability. Its OpenCode worker list is empty pending the owner's
-initial choice. Refresh observed identities as catalogs change; never infer free
-status or select a newly discovered model on the owner's behalf.
-
-Every route intersects current catalog supply with configured selections from
-Hattera's `config.json` (workspace and new-bot defaults) and `bots.json` (bot and
-conversation selections), under `FACTORY_HATTERA_HOME` or `~/.openmausbot`.
-Catalog defaults, previous execution and policy entries do not grant authorization.
-For a work kind, rank that authorized intersection within its declared tier using
-the existing capability and budget rules. If the tier has no eligible candidate
-or the work kind is unmapped, use the existing authorized ranking and record
-`fallback: true` and `fallbackReason` naming the tier and work kind. Omitting the
-work kind preserves ranking across all authorized candidates. This permission
-check also applies to legacy calls; a previously discovered-only route is refused.
-The receipt records the work kind, tier and authorization source paths.
-
-Before dispatch the Lead writes shared/templates/slice-brief.md into the project.
-Workers own separate threads/worktrees and ask mentors for bounded guidance from
-those threads. Mentors do not take over implementation. Escalation to premium
-requires the same check failing twice or a proven incorrect brief, with evidence.
-Rooms carry status, decisions and blockers only. Link detailed explanations instead
-of replaying them in every room turn. Native per-turn usage originates in Hattera's
-usage ledger; a route request is not proof of accepted execution or reported usage.
+Rooms carry status, decisions and blockers; detailed explanations and guidance stay in owning threads. A route request or a builder's passing checks is not independent acceptance. No live settings, allowlist expansion or team-sync application follows from this document.

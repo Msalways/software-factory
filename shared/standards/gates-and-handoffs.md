@@ -8,17 +8,17 @@ Each arrow is a gate. **A gate fails by default** and passes only on recorded ev
 | Gate | Passes when |
 |---|---|
 | Intake | The project is registered in factory memory (path, default branch, test commands, location of `DESIGN.md`) and the request has an outcome and acceptance IDs. |
-| Understand | A capability snapshot for this session exists: tools actually mounted (browser, screenshots, VM, shell) and engines actually ready. Snapshots from earlier sessions count as stale. |
-| R&D | No slice depends on an unresolved decision that would change it. Held decisions are recorded with a default and a deadline. |
+| Understand | A session capability snapshot and a fresh schema-2 project provider snapshot exist (default maximum 60 minutes, catalog stale threshold 24 hours with valid live capture required). Authorization, provider tier, task capability and exact dispatch/cost permission are checked separately. Current source fingerprints/hash/expiry must match; captures are attestations and cannot add models. Actual engine/model/effort is provider-acknowledged or explicitly unconfirmed, never inferred from defaults or ledger. Unknown required choices stay held. Run the session-start audit. |
+| R&D | No slice depends on an unresolved decision that would change it. Held decisions record evidence, a conservative defer/hold option and a deadline; absence of an answer never grants authorization or spend. |
 | Design | For UI slices, the plan design review passes (design-and-e2e.md). Other slices record "no UI surface". |
 | Slice | Each slice has a requirements profile, a done-contract and dependency edges, and fits the size cap. The integration slice is planned. |
-| Route | A routing receipt exists (dynamic-execution.md), and the engine has accepted the execution identity. |
+| Route | The exact profile and current schema-2 preflight/check permit the dispatch; its receipt records snapshot/profile bindings and any exact user premium permission. No held choice proceeds. Requested identity and provider-acknowledged actual identity are separate; unconfirmed execution remains explicit. |
 | Verify | A verifier other than the builder, preferably on a different engine, confirms every done-contract item on the tested revision. |
 | Integrate | Combined acceptance passes on the integration revision after each merge. |
 | Release | design-and-e2e.md release items are present, and the PR body contains the evidence. |
 
 ## Held decisions
-A decision waiting on the user is recorded with the question, a proposed default, the consequence of the default, and a deadline. If there is no answer by the deadline, continue on the default and record it as an assumption that can be reverted. Never hold a decision with an irreversible, outward-facing or cost-increasing default. Those wait for the user.
+Record the question, evidence, conservative defer/hold option, consequence and deadline. Unknown authorization, tier, capability, price comparison or dispatch/cost permission stays held if the user declines or does not answer. A timeout never grants consent, premium tier or spend. Only ordinary reversible choices that do not cross these boundaries may use a previously authorized default.
 
 ## Done-contract (every slice)
 Written in the slice spec before dispatch:
@@ -46,12 +46,12 @@ Between steps and sessions, pass an envelope rather than the whole conversation 
 Classify every failed attempt before acting. Retrying without diagnosis is not allowed.
 | Class | Typical signal | Action |
 |---|---|---|
-| Transient | timeout, 5xx, one 429 | Retry the same route once, with backoff. |
-| Limit | usage, session or quota window exhausted | Re-route (dynamic-execution.md). If progress was already made, continue from a continuation packet. |
-| Broken route | engine or model errors, unusable output | Mark the route bad for this slice and use the next candidate. |
+| Transient | timeout, 5xx, one 429 | Retry the same still-valid permitted route once with backoff; if its preflight or permission expired, hold and recheck. |
+| Limit | usage, session or quota window exhausted | Checkpoint progress and exclude the blocked route. A replacement requires the full fresh preflight and applicable permission; otherwise hold. No automatic premium/paid fallback. |
+| Broken route | engine or model errors, unusable output | Mark the route bad for this slice; any next candidate needs the same authorization/evidence/capability/permission guard. |
 | Too big | context overflow, room inactivity timeout, partial output | Split the slice (back to the Slice gate). |
 | Spec problem | contradictory or missing requirement | Return to R&D or the Lead. Do not guess. |
-| Repeated | same class twice | Escalate one effort step or change engine. A third time goes to the Lead, then the user. |
+| Repeated | same class twice | Ask for bounded guidance, a corrected brief or specific permission. Two failures alone never approve premium, effort/account changes or spend. A third failure goes to the Lead, then the user. |
 Every attempt, its class and the action taken stay in the slice history.
 
 ## Integration: merge queue
