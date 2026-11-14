@@ -29,6 +29,66 @@ function matchesSurface(file, surface) {
   });
 }
 
+
+const sha256 = bytes => require('node:crypto').createHash('sha256').update(bytes).digest('hex');
+function checkUi(worktree, ev, head) {
+  const result = {status:'incomplete',required:[],covered:[],missing:[],invalid:[],reasons:[]};
+  const need = (ok, reason) => { if (!ok) throw Error(reason); };
+  const object = v => v !== null && typeof v === 'object' && !Array.isArray(v);
+  const text = v => typeof v === 'string' && v.trim().length > 0;
+  const integer = v => Number.isInteger(v) && v > 0;
+  const local = p => {need(text(p),'missing file path');return path.resolve(worktree,p);};
+  try {
+    need(object(ev) && object(ev.ui),'UI evidence missing; migrate legacy count-only screenshots to a spec matrix');
+    const ui=ev.ui;
+    // Decode fatally; preserve BOM until the specified single-BOM normalization.
+    const spec=new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(fs.readFileSync(local(ui.specPath))).replace(/^\uFEFF/,'').replace(/\r\n/g,'\n');
+    need(ui.specSha256 === sha256(spec),'spec digest mismatch');
+    const start='<!-- factory-ui-requirements:start -->',end='<!-- factory-ui-requirements:end -->';
+    need(spec.split(start).length===2 && spec.split(end).length===2,'exactly one requirements block required');
+    const block=spec.slice(spec.indexOf(start)+start.length,spec.indexOf(end));
+    const match=block.match(/^\s*\x60\x60\x60json\s*\n([\s\S]*?)\n\x60\x60\x60\s*$/);
+    need(match,'malformed requirements block');const req=JSON.parse(match[1]);
+    need(object(req)&&req.schema==='factory-ui-requirements/1'&&text(req.specVersion)&&req.specVersion===ev.specVersion,'requirements schema/version mismatch');
+    const ids=(items,viewport)=>{need(Array.isArray(items)&&items.length>0,'empty requirements');const map=new Map();for(const item of items){need(object(item)&&text(item.id)&&!map.has(item.id),'invalid/duplicate requirement ID');if(viewport)need(integer(item.width)&&integer(item.height)&&(item.deviceScaleFactor===undefined||(Number.isFinite(item.deviceScaleFactor)&&item.deviceScaleFactor>0)),'invalid viewport geometry');else need(text(item.description),'missing state description');map.set(item.id,item);}return map;};
+    const states=ids(req.states,false),ports=ids(req.viewports,true);
+    for(const state of states.keys())for(const viewport of ports.keys())result.required.push({state,viewport});
+    need(Array.isArray(ev.screenshots),'screenshots must be an array');
+    need(object(ui.capture)&&['available','unavailable'].includes(ui.capture.status),'invalid capture status');
+    if(ui.capture.status==='unavailable')need(text(ui.capture.reason),'unavailable capture requires reason');
+    const cells=new Set(),physical=new Set(),inodes=new Set(),triples=[];
+    for(const shot of ev.screenshots){
+      try {
+        need(object(shot)&&states.has(shot.state)&&ports.has(shot.viewport),'unknown screenshot cell');
+        const cell=JSON.stringify([shot.state,shot.viewport]);need(!cells.has(cell),'duplicate screenshot cell');cells.add(cell);
+        const file=local(shot.path),real=fs.realpathSync(file);need(!physical.has(real),'reused physical screenshot');physical.add(real);
+        const stat=fs.statSync(file);need(stat.isFile(),'screenshot is not a regular file');const inode=stat.dev+':'+stat.ino;need(!inodes.has(inode),'reused physical screenshot');inodes.add(inode);const bytes=fs.readFileSync(file);
+        const png=bytes.length>=8&&bytes.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]));
+        const jpeg=bytes.length>=3&&bytes[0]===255&&bytes[1]===216&&bytes[2]===255;
+        const webp=bytes.length>=12&&bytes.toString('ascii',0,4)==='RIFF'&&bytes.toString('ascii',8,12)==='WEBP';
+        need(png||jpeg||webp,'empty/nonimage screenshot');const hash=sha256(bytes);
+        need(typeof shot.sha256==='string'&&shot.sha256.toLowerCase()===hash,'screenshot digest mismatch');
+        need(/^[0-9a-f]{40}$/.test(head)&&ev.revision===head&&shot.revision===head,'screenshot revision mismatch');
+        const p=ports.get(shot.viewport),factor=p.deviceScaleFactor??1;
+        need(integer(shot.pixelWidth)&&integer(shot.pixelHeight)&&(shot.fullPage===undefined||typeof shot.fullPage==='boolean'),'invalid screenshot geometry');
+        need(shot.pixelWidth===Math.round(p.width*factor)&&(shot.fullPage?shot.pixelHeight>=Math.round(p.height*factor):shot.pixelHeight===Math.round(p.height*factor)),'declared geometry mismatch');
+        result.covered.push({state:shot.state,viewport:shot.viewport});triples.push([shot.state,shot.viewport,hash]);
+      }catch(error){result.invalid.push({state:shot?.state??null,viewport:shot?.viewport??null,reason:error.message});}
+    }
+    result.missing=result.required.filter(cell=>!result.covered.some(c=>c.state===cell.state&&c.viewport===cell.viewport));
+    if(result.invalid.length){result.reasons.push('invalid designated screenshot metadata/artifacts');return result;}
+    if(ui.review!==undefined){const r=ui.review;need(object(r)&&['clean','open'].includes(r.result)&&text(r.reviewer)&&r.revision===head&&typeof r.screenshotSetSha256==='string'&&/^[0-9a-f]{64}$/.test(r.screenshotSetSha256),'invalid review shape');const report=local(r.path);need(fs.statSync(report).isFile()&&fs.statSync(report).size>0,'empty review report');}
+    if(ui.capture.status==='unavailable'&&ev.screenshots.length===0){result.status='unrendered';result.reasons.push(ui.capture.reason);return result;}
+    if(result.missing.length||ui.capture.status==='unavailable'){result.reasons.push(ui.capture.reason||'required cells missing');return result;}
+    const review=ui.review;need(object(review)&&['clean','open'].includes(review.result)&&text(review.reviewer)&&review.revision===head,'missing/invalid/stale review');
+    const report=local(review.path);need(fs.statSync(report).isFile()&&fs.statSync(report).size>0,'empty review report');
+    triples.sort((a,b)=>a[0]<b[0]?-1:a[0]>b[0]?1:a[1]<b[1]?-1:a[1]>b[1]?1:0);
+    need(review.screenshotSetSha256===sha256(JSON.stringify(triples)),'review screenshot set mismatch');
+    result.status=review.result;if(review.result==='open')result.reasons.push('review has open findings');
+  }catch(error){result.reasons.push(error.message);}
+  return result;
+}
+
 function check(worktree, evidencePath, opts = {}) {
   const res = {gates: {}, findings: [], worktree, evidence: evidencePath};
   const fail = (gate, msg) => { res.gates[gate] = 'fail'; res.findings.push(`${gate}: ${msg}`); };
@@ -50,7 +110,8 @@ function check(worktree, evidencePath, opts = {}) {
       if (!full.ok) fail('artifacts_exist', `claimed revision ${ev.revision} does not exist`);
       else if (full.out !== head) fail('artifacts_exist', `claimed revision ${ev.revision} is not HEAD (${head.slice(0, 12)}); verify the tested revision`);
     }
-    for (const s of ev.screenshots || []) {
+    for (const s of (Array.isArray(ev.screenshots) ? ev.screenshots : [])) {
+      if (!s || typeof s.path !== 'string') { if (!opts.requireScreenshots) fail('artifacts_exist', 'invalid screenshot path'); continue; }
       const p = path.isAbsolute(s.path) ? s.path : path.join(worktree, s.path);
       if (!fs.existsSync(p)) fail('artifacts_exist', `screenshot missing: ${s.path}`);
     }
@@ -58,7 +119,7 @@ function check(worktree, evidencePath, opts = {}) {
   }
   const status = git(worktree, ['status', '--porcelain', '--untracked-files=normal']).out;
   // evidence/screenshot files themselves may be untracked; ignore them
-  const ignore = new Set([evidencePath, ...((ev && ev.screenshots) || []).map(s => s.path)].map(p => norm(path.relative(worktree, path.resolve(worktree, p)))));
+  const ignore = new Set([evidencePath, ...(Array.isArray(ev?.screenshots) ? ev.screenshots : []).filter(s=>s&&typeof s.path==='string').map(s => s.path)].map(p => norm(path.relative(worktree, path.resolve(worktree, p)))));
   const dirty = status.split('\n').filter(Boolean).map(l => norm(l.slice(3))).filter(f => !ignore.has(f));
   if (dirty.length) fail('artifacts_exist', `working tree not clean: ${dirty.slice(0, 10).join(', ')}`);
   if (ev && ev.treeClean === true && dirty.length) res.findings.push('claim mismatch: evidence says treeClean=true but tree is dirty');
@@ -119,6 +180,11 @@ function check(worktree, evidencePath, opts = {}) {
   }
   pass('tests_pass');
 
+  if (opts.requireScreenshots) {
+    res.uiEvidence=checkUi(worktree,ev,head);
+    if(res.uiEvidence.status==='clean')pass('ui_coverage');
+    else fail('ui_coverage',res.uiEvidence.status+': '+res.uiEvidence.reasons.join('; '));
+  } else if(ev?.ui) res.findings.push('UI_EVIDENCE_NOT_ENFORCED: UI surface requires --ui; metadata was not checked');
   res.revision = head;
   res.checkedAt = new Date().toISOString();
   res.pass = Object.values(res.gates).every(v => v === 'pass');
@@ -142,6 +208,7 @@ if (require.main === module) {
   const r = check(path.resolve(a[1]), path.resolve(a[2]), {base, run, requireScreenshots: ui});
   if (json) console.log(JSON.stringify(r, null, 2));
   else {
+    if(r.uiEvidence) console.log('UI EVIDENCE: '+r.uiEvidence.status);
     for (const [g, v] of Object.entries(r.gates)) console.log(`${v.toUpperCase().padEnd(8)} ${g}`);
     for (const f of r.findings) console.log(`  - ${f}`);
     console.log(r.pass ? 'ALL GATES PASS' : 'GATES NOT PASSED');

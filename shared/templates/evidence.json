@@ -16,15 +16,95 @@
     "session": "<thread/session id>",
     "receipt": "<pointer to routing receipt>"
   },
-  "expectedSurface": ["<path, dir/ or glob from the done-contract>"],
-  "changedFiles": ["<path>"],
-  "outsideExpectedSurface": [{ "path": "<path>", "reason": "<why>" }],
-  "checks": [
-    { "command": "<exact command>", "exitCode": 0, "summary": "<passed/failed counts>", "log": "<pointer>" }
+  "expectedSurface": [
+    "<path, dir/ or glob from the done-contract>"
   ],
-  "screenshots": [{ "viewport": "<w x h>", "state": "<default/empty/error/...>", "path": "<path>" }],
-  "attempts": [{ "n": 1, "route": "<engine/model>", "result": "<ok|failure class>", "note": "<short>" }],
-  "limitations": ["<untested boundary or skip, with reason>"],
+  "changedFiles": [
+    "<path>"
+  ],
+  "outsideExpectedSurface": [
+    {
+      "path": "<path>",
+      "reason": "<why>"
+    }
+  ],
+  "checks": [
+    {
+      "command": "<exact command>",
+      "exitCode": 0,
+      "summary": "<passed/failed counts>",
+      "log": "<pointer>"
+    }
+  ],
+  "screenshots": [
+    {
+      "state": "default",
+      "viewport": "narrow",
+      "path": "<example data: shots/default-narrow.png>",
+      "revision": "<example data: full tested HEAD SHA>",
+      "sha256": "<example data: 64 hex of exact file bytes>",
+      "pixelWidth": 375,
+      "pixelHeight": 812,
+      "fullPage": false
+    },
+    {
+      "state": "default",
+      "viewport": "wide",
+      "path": "<example data: shots/default-wide.png>",
+      "revision": "<example data: full tested HEAD SHA>",
+      "sha256": "<example data: 64 hex of exact file bytes>",
+      "pixelWidth": 1280,
+      "pixelHeight": 800,
+      "fullPage": false
+    },
+    {
+      "state": "error",
+      "viewport": "narrow",
+      "path": "<example data: shots/error-narrow.png>",
+      "revision": "<example data: full tested HEAD SHA>",
+      "sha256": "<example data: 64 hex of exact file bytes>",
+      "pixelWidth": 375,
+      "pixelHeight": 812,
+      "fullPage": false
+    },
+    {
+      "state": "error",
+      "viewport": "wide",
+      "path": "<example data: shots/error-wide.png>",
+      "revision": "<example data: full tested HEAD SHA>",
+      "sha256": "<example data: 64 hex of exact file bytes>",
+      "pixelWidth": 1280,
+      "pixelHeight": 800,
+      "fullPage": false
+    }
+  ],
+  "attempts": [
+    {
+      "n": 1,
+      "route": "<engine/model>",
+      "result": "<ok|failure class>",
+      "note": "<short>"
+    }
+  ],
+  "limitations": [
+    "<untested boundary or skip, with reason>"
+  ],
   "producedBy": "builder|verifier",
-  "recordedAt": "<ISO-8601 with offset>"
+  "recordedAt": "<ISO-8601 with offset>",
+  "ui": {
+    "_note": "OPTIONAL: keep ui and the example screenshots entries only for UI-surface slices verified with check --ui; non-UI slices use \"screenshots\": [] and omit ui. Every value is example data, never real evidence. The four-cell example (2 states x 2 viewports) needs four screenshot entries. Legacy viewport strings such as \"<w x h>\" stay permissible as IDs only when the spec declares them.",
+    "specPath": "<approved slice spec.md>",
+    "specSha256": "<example data: 64 hex, utf8-bomless-lf-v1 of the spec>",
+    "capture": {
+      "status": "available",
+      "reason": null
+    },
+    "review": {
+      "result": "clean",
+      "revision": "<example data: same full SHA>",
+      "reviewer": "<independent reviewer identity>",
+      "path": "<local nonempty design review report>",
+      "screenshotSetSha256": "<example data: 64 hex over sorted [state,viewport,sha] triples>"
+    }
+  }
 }
