@@ -118,3 +118,16 @@ for(const [name,change,status] of cases)test('UI '+name,()=>{const f=uiFixture()
 test('UI normalized BOM/CRLF and declared DPR/fullPage are supported',()=>{const f=uiFixture();f.req.viewports[0].deviceScaleFactor=2;const text=f.spec();f.ev.ui.specSha256=hash(text);fs.writeFileSync(f.ev.ui.specPath,'\uFEFF'+text.replace(/\n/g,'\r\n'));for(const s of f.ev.screenshots.filter(s=>s.viewport==='small')){s.pixelWidth=2;s.pixelHeight=4;s.fullPage=true;}assert.equal(f.run().uiEvidence.status,'clean');fs.writeFileSync(f.ev.ui.specPath,Buffer.from([255,254,255]));assert.equal(f.run().uiEvidence.status,'incomplete');});
 test('UI metadata without flag is advisory, legacy nonUI remains permitted, legacy UI fails',()=>{const f=uiFixture();const file=write(f.out,f.ev),r=check(f.d,file,{run:true});assert.equal(r.pass,true);assert.ok(r.findings.some(x=>x.includes('UI_EVIDENCE_NOT_ENFORCED')));delete f.ev.ui;assert.equal(f.run().uiEvidence.status,'incomplete');assert.equal(check(f.d,write(f.out,f.ev),{run:true}).pass,true);});
 test('UI CLI plain and JSON exits preserve 0/1/2 contract',()=>{const f=uiFixture(),cli=path.join(__dirname,'factory-gates.cjs');const args=['check',f.d,write(f.out,f.ev),'--run','--ui'];let r=spawnSync(process.execPath,[cli,...args],{encoding:'utf8'});assert.equal(r.status,0,r.stderr);assert.match(r.stdout,/UI EVIDENCE: clean/);f.ev.ui.review.result='open';write(f.out,f.ev);r=spawnSync(process.execPath,[cli,...args,'--json'],{encoding:'utf8'});assert.equal(r.status,1);assert.equal(JSON.parse(r.stdout).uiEvidence.status,'open');assert.equal(spawnSync(process.execPath,[cli,'wrong']).status,2);});
+
+// S-B2fix: a present, non-array screenshots field must fail artifacts_exist (library and CLI exit) in default and --ui modes.
+for (const [name, value] of [['object', {}], ['string', 'shots/x.png'], ['number', 7]]) {
+  for (const ui of [false, true]) test(`non-array screenshots (${name}) fails artifacts_exist${ui ? ' with --ui' : ''}`, () => {
+    const {d, base, head} = repo();
+    const p = write(d, {baseline: base, revision: head, changedFiles: ['src/a.js', 'src/b.js'], screenshots: value, checks: [{command: 'node -e "0"', exitCode: 0}]});
+    const r = check(d, p, ui ? {run: true, ui: true, requireScreenshots: true} : {run: true});
+    assert.equal(r.gates.artifacts_exist, 'fail');
+    assert.match(r.findings.join('\n'), /screenshots must be an array/);
+    const cli = spawnSync(process.execPath, [path.join(__dirname, 'factory-gates.cjs'), 'check', d, p, '--run', ...(ui ? ['--ui'] : [])], {encoding: 'utf8'});
+    assert.equal(cli.status, 1, cli.stdout + cli.stderr);
+  });
+}
