@@ -110,6 +110,7 @@ function check(worktree, evidencePath, opts = {}) {
       if (!full.ok) fail('artifacts_exist', `claimed revision ${ev.revision} does not exist`);
       else if (full.out !== head) fail('artifacts_exist', `claimed revision ${ev.revision} is not HEAD (${head.slice(0, 12)}); verify the tested revision`);
     }
+    if (ev.screenshots !== undefined && !Array.isArray(ev.screenshots)) fail('artifacts_exist', 'screenshots must be an array when present');
     for (const s of (Array.isArray(ev.screenshots) ? ev.screenshots : [])) {
       if (!s || typeof s.path !== 'string') { if (!opts.requireScreenshots) fail('artifacts_exist', 'invalid screenshot path'); continue; }
       const p = path.isAbsolute(s.path) ? s.path : path.join(worktree, s.path);
