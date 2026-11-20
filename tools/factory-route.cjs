@@ -732,13 +732,18 @@ function captureIdentities(project, {text, sessionId = null, validMinutes = 60} 
   const capture = {schema: 1, sessionId: sid, capturedAt: new Date(t).toISOString(), validUntil: new Date(t + minutes * 60000).toISOString(), nativeFingerprint, records};
   const file = path.join(STATE, 'route-identities.json'), tmp = file + '.' + process.pid + '.tmp';
   fs.mkdirSync(STATE, {recursive: true});
-  let previous = null; try { previous = fs.readFileSync(file); } catch {}
+  let previous = null; // only a missing file means "no previous capture"; any other read error aborts before anything is written
+  try { previous = fs.readFileSync(file); } catch (e) { if (e?.code !== 'ENOENT') throw Error('cannot read the existing capture (' + (e?.code || e?.message) + '); nothing was written and the existing file is untouched'); }
   fs.writeFileSync(tmp, JSON.stringify(capture, null, 2));
   fs.renameSync(tmp, file);
   try { readCurrentSources({project, sessionId: sid, now: t}); } // the reader must accept exactly what was written
   catch (e) {
-    if (previous === null) fs.rmSync(file, {force: true}); else fs.writeFileSync(file, previous);
-    throw Error('capture rejected by the route reader, previous capture restored: ' + e.message);
+    let outcome;
+    try {
+      if (previous === null) { fs.rmSync(file, {force: true}); outcome = 'no previous capture existed; the rejected file was removed'; }
+      else { fs.writeFileSync(tmp, previous); fs.renameSync(tmp, file); outcome = 'previous capture restored'; }
+    } catch (r) { try { fs.rmSync(tmp, {force: true}); } catch {} outcome = 'RESTORE FAILED (' + (r?.code || r?.message) + '); ' + file + ' may hold the rejected capture'; }
+    throw Error('capture rejected by the route reader, ' + outcome + ': ' + e.message);
   }
   return {schema: 1, project, sessionId: sid, capturedAt: capture.capturedAt, validUntil: capture.validUntil, nativeFingerprint, records: Object.keys(records).sort(), file,
     limitation: 'Attestation of the supplied records only; not authenticated provider or account proof.'};

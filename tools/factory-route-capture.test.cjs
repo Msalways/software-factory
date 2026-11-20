@@ -127,3 +127,55 @@ test('a native config change after capture invalidates it until re-captured', ()
   fs.appendFileSync(path.join(home, 'config.json'), ' ');
   assert.equal(check({FACTORY_SESSION_ID: sessionId}).status, 8);
 });
+
+// Runs captureIdentities in a child with a patched fs, against the fixture only.
+function captureWithFault(patch, text) {
+  const r = spawnSync(process.execPath, ['-e', `
+    const fs=require('fs');const file=${JSON.stringify(capturePath)};
+    ${patch}
+    const R=require(${JSON.stringify(routeCjs)});
+    try{R.captureIdentities(${JSON.stringify(project)},{text:${JSON.stringify(text)},sessionId:${JSON.stringify(sessionId)}});console.log('OK');}
+    catch(e){console.log('ERR '+e.message);process.exit(3);}`],
+  {encoding: 'utf8', env: {...process.env, FACTORY_HATTERA_HOME: home, FACTORY_STATE_DIR: state}});
+  return r;
+}
+
+test('an unreadable existing capture aborts before writing and leaves it untouched', () => {
+  qualifiedFixture();
+  const before = fs.readFileSync(capturePath);
+  const eacces = `const o=fs.readFileSync;fs.readFileSync=function(p,...a){if(String(p)===file){const e=Error('denied');e.code='EACCES';throw e;}return o.call(this,p,...a);};`;
+  // a rejectable capture would previously delete the valid file; a good one must also be refused
+  for (const text of [JSON.stringify({records: {}}), JSON.stringify({records})]) {
+    const r = captureWithFault(eacces, text);
+    assert.equal(r.status, 3, r.stdout + r.stderr);
+    assert.match(r.stdout, /cannot read the existing capture \(EACCES\); nothing was written/);
+    assert.doesNotMatch(r.stdout, /restored/);
+    assert.deepEqual(fs.readFileSync(capturePath), before);
+    assert.deepEqual(fs.readdirSync(state).filter(f => f.endsWith('.tmp')), []);
+  }
+  // and through the CLI: a non-ENOENT read error (path is a directory) exits non-zero without writing
+  fs.rmSync(capturePath); fs.mkdirSync(capturePath);
+  const cliRun = cli(['capture-identities', project, '--file', capFile, '--session', sessionId]);
+  assert.notEqual(cliRun.status, 0);
+  assert.match(cliRun.stderr, /cannot read the existing capture/);
+  assert.ok(fs.statSync(capturePath).isDirectory());
+});
+
+test('a rejected capture restores the previous bytes exactly', () => {
+  qualifiedFixture();
+  const before = fs.readFileSync(capturePath);
+  const r = cli(['capture-identities', project, '--session', 'other-session'], {input: JSON.stringify({records: {}})});
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /previous capture restored/);
+  assert.deepEqual(fs.readFileSync(capturePath), before);
+  assert.deepEqual(fs.readdirSync(state).filter(f => f.endsWith('.tmp')), []);
+});
+
+test('a restore that cannot happen is reported as failed, never as restored', () => {
+  qualifiedFixture();
+  const failRestore = `const o=fs.renameSync;let n=0;fs.renameSync=function(...a){if(++n===2){const e=Error('busy');e.code='EBUSY';throw e;}return o.apply(this,a);};`;
+  const r = captureWithFault(failRestore, JSON.stringify({records: {}}));
+  assert.equal(r.status, 3, r.stdout + r.stderr);
+  assert.match(r.stdout, /RESTORE FAILED \(EBUSY\)/);
+  assert.doesNotMatch(r.stdout, /previous capture restored/);
+});
