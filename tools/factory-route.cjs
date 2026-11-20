@@ -6,6 +6,9 @@
 //   supply   [--json]                         snapshot of engines/models/evidence -> state/routing/supply.json
 //   allowlist <project> (--add e/m,... --source text | --remove e/m,... | --show)
 //   snapshot <project> [--team-setup file|-] [--captured-at ISO] [--evidence file] [--json]
+//   capture-identities <project> [--file f|-] [--session id] [--valid-minutes n<=60]
+//            writes state/routing/route-identities.json from a supplied capture {records:{"<instance>/<model>":{providerId,routeScope,sourceRef}}};
+//            prints the session id to export as FACTORY_SESSION_ID. An attestation of the supplied records, not account proof.
 //   audit <project> --section name [--since ISO] [--json]
 //   check <project> <engine/model> --purpose native-delegation|cli-run|route|verify --profile file [--actual file] [--json]
 //   route    <profile.json> --project <project> [--work-kind kind] [--exclude e/m,..] [--avoid engine,..] [--not-engine e] [--json]
@@ -647,7 +650,7 @@ function parseSourceJson(text) {
   }
 
 // Independently current, read-only source boundary. Attestations are not provider authentication.
-function readCurrentSources({project,sessionId,now:time}) {
+function readCurrentSources({project,sessionId,now:time,nativeOnly=false}) {
   const {fingerprint:H,resolveModelEvidence}=require('./provider-snapshot.cjs');
   const ok=(v,m)=>{if(!v)throw Error(m);},str=v=>typeof v==='string'&&v.trim().length>0;
   const safe=v=>{ok(str(v)&&/^[\w.-]+$/.test(v)&&!['.','..','__proto__','constructor','prototype'].includes(v),'unsafe identifier');return v;};
@@ -674,7 +677,7 @@ function readCurrentSources({project,sessionId,now:time}) {
 
   const catalogs=instances.map(e=>{const file=path.join(P.catalogs,e.id+'.json'),cat=read(file);if(cat===null)return {id:e.id,driver:e.driver,file:missing,catalog:missing};object(cat);ok(Array.isArray(cat.options)&&(cat.default===undefined||typeof cat.default==='string'),'invalid catalog');unique(cat.options.map(o=>{object(o);ok(str(o.id),'option id required');key(e.id+'/'+o.id);return o.id;}),'options');H(cat.options);return {id:e.id,driver:e.driver,file:present(stats.get(file)),catalog:present({default:cat.default??null,options:[...cat.options].sort((a,b)=>a.id<b.id?-1:1)})};});
   const N=catalogs.map(e=>({...e,catalog:e.catalog.state==='missing'?missing:present({...e.catalog.value,options:e.catalog.value.options.map(o=>Object.fromEntries(Object.entries(o).filter(([k])=>!['label','observedAt','mtime','path','paths'].includes(k))))})}));
-  const nativeBindingPreimage={schema:1,config:C,bots:B,catalogs:N},nativeFingerprint=H(nativeBindingPreimage);
+  const nativeBindingPreimage={schema:1,config:C,bots:B,catalogs:N},nativeFingerprint=H(nativeBindingPreimage);if(nativeOnly)return {nativeFingerprint};
   const capture=read(path.join(STATE,'route-identities.json'),true);exact(capture,['schema','sessionId','capturedAt','validUntil','nativeFingerprint','records']);ok(capture.schema===1&&capture.sessionId===sessionId&&capture.nativeFingerprint===nativeFingerprint,'identity session/native binding mismatch');const start=observed(capture.capturedAt),end=stamp(capture.validUntil);ok(time<end&&end>start&&end-start<=3600000,'identity capture expired/invalid');object(capture.records);
   const raw=read(P.policy),policy=raw??{};object(policy);const history=read(path.join(STATE,'project-catalog-history',project+'.json'));
   if(history!==null){ok(history.schema===1,'invalid history schema');object(history.engines);for(const [id,h] of Object.entries(history.engines)){safe(id);object(h);object(h.retirementGeneration);
@@ -702,6 +705,43 @@ const generations={...e.retirementGenerations};ok(Object.hasOwn(generations,r.ke
   const preimages={config:{schema:1,native:C,sessionId,routeIdentities:present(capture)},bots:{schema:1,native:B},catalogs:{schema:1,engines:catalogs},policy:{schema:1,project,source:raw===null?'missing':'present',allowlist:sortedAllow,snapshot,capability:scoring.capability,costRank:scoring.costRank,balanced:scoring.balanced,engines,models,knownExceptions:[...(policy.knownExceptions??[])].sort((a,b)=>Hjson(a)<Hjson(b)?-1:Hjson(a)>Hjson(b)?1:0)},evidence:{schema:1,source:evidence===null?missing:present({schema:1,records:[...records].sort((a,b)=>{const x=[a.key,a.field,a.sourceRef,Hjson(a)],y=[b.key,b.field,b.sourceRef,Hjson(b)];return x.join('\0')<y.join('\0')?-1:1;})})},decisions:{schema:1,project,policySource:raw===null?'missing':'present',modelDecisions,premiumApprovals},history:{schema:1,project,source:history===null?missing:present(history)},limits:{schema:1,source:events===null?'missing':'present',events:events??[]},opencode:{schema:1,project,preference:pref===null?missing:present(pref),advisory:{status:'ignored-for-project-routing',discovery:advisory===null?missing:present(advisory)}}};
   const revalidate=(checkNow=time)=>{ok(Number.isFinite(checkNow)&&checkNow>=time&&checkNow<end,'expired capture');for(const [file,s] of stats)ok(H(stat(file))===H(s),'source changed since read: '+file);ok(time<end,'expired capture');return true;};revalidate();
   return {preimages,currentFingerprints:Object.fromEntries(Object.entries(preimages).map(([k,v])=>[k,H(v)])),routeScopes,captureValidUntil:capture.validUntil,inputs:{configured,nativeBindingPreimage,nativeFingerprint,engines:inputsEngines,evidence:records,decisions:modelDecisions,preference:pref,history,allowlist:sortedAllow,policy:preimages.policy,limits:events??[]},revalidate};
+}
+
+// Writes the route-identity capture the reader requires. Records come only from the supplied capture;
+// nativeFingerprint is computed by readCurrentSources itself (nativeOnly), never duplicated. The result is an
+// attestation of the supplied records, not authenticated provider/account proof.
+function captureIdentities(project, {text, sessionId = null, validMinutes = 60} = {}) {
+  projectId(project);
+  const minutes = Number(validMinutes);
+  if (!Number.isFinite(minutes) || minutes <= 0 || minutes > 60) throw Error('valid-minutes must be greater than 0 and at most 60');
+  const input = parseSourceJson(text);
+  if (!input || typeof input !== 'object' || Array.isArray(input) || input.records === undefined) throw Error('capture must be an object with records');
+  let records = input.records;
+  if (Array.isArray(records)) {
+    const out = {};
+    for (const r of records) {
+      if (!r || typeof r.key !== 'string' || Object.hasOwn(out, r.key)) throw Error('records entries need a unique key');
+      const {key, ...rest} = r; out[key] = rest;
+    }
+    records = out;
+  }
+  if (!records || typeof records !== 'object' || Array.isArray(records)) throw Error('records must be an object keyed by <instance>/<model>');
+  const sid = sessionId || process.env.FACTORY_SESSION_ID || require('node:crypto').randomUUID();
+  const t = now();
+  const {nativeFingerprint} = readCurrentSources({project, sessionId: sid, now: t, nativeOnly: true});
+  const capture = {schema: 1, sessionId: sid, capturedAt: new Date(t).toISOString(), validUntil: new Date(t + minutes * 60000).toISOString(), nativeFingerprint, records};
+  const file = path.join(STATE, 'route-identities.json'), tmp = file + '.' + process.pid + '.tmp';
+  fs.mkdirSync(STATE, {recursive: true});
+  let previous = null; try { previous = fs.readFileSync(file); } catch {}
+  fs.writeFileSync(tmp, JSON.stringify(capture, null, 2));
+  fs.renameSync(tmp, file);
+  try { readCurrentSources({project, sessionId: sid, now: t}); } // the reader must accept exactly what was written
+  catch (e) {
+    if (previous === null) fs.rmSync(file, {force: true}); else fs.writeFileSync(file, previous);
+    throw Error('capture rejected by the route reader, previous capture restored: ' + e.message);
+  }
+  return {schema: 1, project, sessionId: sid, capturedAt: capture.capturedAt, validUntil: capture.validUntil, nativeFingerprint, records: Object.keys(records).sort(), file,
+    limitation: 'Attestation of the supplied records only; not authenticated provider or account proof.'};
 }
 
 // These imports attest user/operator records; they do not authenticate the user or authorize models.
@@ -1026,6 +1066,14 @@ if (require.main === module) {
         console.log(`SNAPSHOT ${project} hash=${snap.hash} expires=${snap.expiresAt} teamSetup=${snap.sources.teamSetup.status}`);
         for (const m of snap.models) console.log(m.authorization.status === 'allowed' ? `  ALLOWED ${m.key}${m.authorization.flags.length ? '  flags: ' + m.authorization.flags.join(', ') : ''}` : `  REFUSED ${m.key}: ${m.authorization.reasons.join('; ')}`);
       }
+    } else if (cmd === 'capture-identities') {
+      const project = projectId(a.shift()), file = flag('--file'), sid = flag('--session'), minutes = flag('--valid-minutes');
+      if (a.length) throw Error('usage: capture-identities <project> [--file f|-] [--session id] [--valid-minutes n<=60]');
+      const out = captureIdentities(project, {text: readIn(file), sessionId: sid ?? null, validMinutes: minutes ?? 60});
+      if (json) console.log(JSON.stringify(out, null, 2));
+      else { console.log(`CAPTURED ${project} records=${out.records.length} validUntil=${out.validUntil}
+${out.limitation}
+export FACTORY_SESSION_ID=${out.sessionId}`); }
     } else if (cmd === 'supply') {
       const s = supply();
       if (json) console.log(JSON.stringify(s, null, 2));
@@ -1079,4 +1127,4 @@ if (require.main === module) {
     }
   } catch (e) { console.error(e.message); process.exit(2); }
 }
-module.exports = {classify, supply, route, recordLimit, activeLimits, P, readCurrentSources, takeSnapshot, loadSnapshot, snapshotPath};
+module.exports = {classify, supply, route, recordLimit, activeLimits, P, readCurrentSources, captureIdentities, takeSnapshot, loadSnapshot, snapshotPath};
